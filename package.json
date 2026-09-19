@@ -1,0 +1,414 @@
+{
+  "name": "plan-queue",
+  "displayName": "Plan Queue",
+  "description": "Track and run a plan's per-task prompts through Claude Code, one fresh context window per task.",
+  "version": "0.1.0",
+  "publisher": "akotrulev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akotrulev/plan-queue.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "planQueue",
+          "title": "Plan Queue",
+          "icon": "media/queue.svg"
+        }
+      ]
+    },
+    "views": {
+      "planQueue": [
+        {
+          "id": "planQueue.tasks",
+          "name": "Plans",
+          "icon": "media/queue.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "planQueue.tasks",
+        "contents": "No plans found.\n\nPlan Queue looks for markdown files matching `$(gear) planQueue.planGlob` (default `docs/plans/**/*.md`) that contain a `## Prompts` section with one `### <id> — <title>` heading per task.\n\n[Open settings](command:planQueue.openSettings)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "planQueue.refresh",
+        "title": "Refresh",
+        "category": "Plan Queue",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "planQueue.runQueue",
+        "title": "Run queue",
+        "category": "Plan Queue",
+        "icon": "$(play)"
+      },
+      {
+        "command": "planQueue.runFromHere",
+        "title": "Run from here",
+        "category": "Plan Queue",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "planQueue.runTask",
+        "title": "Run this task only",
+        "category": "Plan Queue",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "planQueue.stop",
+        "title": "Stop the queue",
+        "category": "Plan Queue",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "planQueue.toggleSkip",
+        "title": "Skip / unskip",
+        "category": "Plan Queue",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "planQueue.markDone",
+        "title": "Mark done",
+        "category": "Plan Queue",
+        "icon": "$(check)"
+      },
+      {
+        "command": "planQueue.resetTask",
+        "title": "Reset to pending",
+        "category": "Plan Queue",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "planQueue.resetPlan",
+        "title": "Reset all tasks",
+        "category": "Plan Queue",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "planQueue.openPrompt",
+        "title": "Open the prompt in the plan",
+        "category": "Plan Queue",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "planQueue.previewPrompt",
+        "title": "Preview the prompt as sent",
+        "category": "Plan Queue",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "planQueue.showLog",
+        "title": "Show the task log",
+        "category": "Plan Queue",
+        "icon": "$(output)"
+      },
+      {
+        "command": "planQueue.moveUp",
+        "title": "Move up",
+        "category": "Plan Queue",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "planQueue.moveDown",
+        "title": "Move down",
+        "category": "Plan Queue",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "planQueue.restoreOrder",
+        "title": "Restore the plan's own order",
+        "category": "Plan Queue",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "planQueue.openSettings",
+        "title": "Open settings",
+        "category": "Plan Queue",
+        "icon": "$(gear)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "planQueue.runQueue",
+          "when": "view == planQueue.tasks && !planQueue.running",
+          "group": "navigation@1"
+        },
+        {
+          "command": "planQueue.stop",
+          "when": "view == planQueue.tasks && planQueue.running",
+          "group": "navigation@1"
+        },
+        {
+          "command": "planQueue.refresh",
+          "when": "view == planQueue.tasks",
+          "group": "navigation@2"
+        },
+        {
+          "command": "planQueue.openSettings",
+          "when": "view == planQueue.tasks",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "planQueue.runFromHere",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/ && !planQueue.running",
+          "group": "inline@1"
+        },
+        {
+          "command": "planQueue.openPrompt",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "inline@2"
+        },
+        {
+          "command": "planQueue.runTask",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/ && !planQueue.running",
+          "group": "1_run@1"
+        },
+        {
+          "command": "planQueue.runFromHere",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/ && !planQueue.running",
+          "group": "1_run@2"
+        },
+        {
+          "command": "planQueue.toggleSkip",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "2_state@1"
+        },
+        {
+          "command": "planQueue.markDone",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "2_state@2"
+        },
+        {
+          "command": "planQueue.resetTask",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "2_state@3"
+        },
+        {
+          "command": "planQueue.moveUp",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "3_order@1"
+        },
+        {
+          "command": "planQueue.moveDown",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "3_order@2"
+        },
+        {
+          "command": "planQueue.previewPrompt",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "4_show@1"
+        },
+        {
+          "command": "planQueue.showLog",
+          "when": "view == planQueue.tasks && viewItem =~ /^task/",
+          "group": "4_show@2"
+        },
+        {
+          "command": "planQueue.runQueue",
+          "when": "view == planQueue.tasks && viewItem == plan && !planQueue.running",
+          "group": "inline@1"
+        },
+        {
+          "command": "planQueue.restoreOrder",
+          "when": "view == planQueue.tasks && viewItem == plan",
+          "group": "3_order@1"
+        },
+        {
+          "command": "planQueue.resetPlan",
+          "when": "view == planQueue.tasks && viewItem == plan",
+          "group": "2_state@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "planQueue.moveUp",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.moveDown",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.toggleSkip",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.markDone",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.resetTask",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.resetPlan",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.openPrompt",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.previewPrompt",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.showLog",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.restoreOrder",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.runFromHere",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.runTask",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Plan Queue",
+      "properties": {
+        "planQueue.planGlob": {
+          "type": "string",
+          "default": "docs/plans/**/*.md",
+          "description": "Workspace-relative glob for plan files. Only files with a '## Prompts' section are listed."
+        },
+        "planQueue.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Path to the Claude Code CLI."
+        },
+        "planQueue.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model passed to --model. Empty uses the CLI's default."
+        },
+        "planQueue.permissionMode": {
+          "type": "string",
+          "enum": [
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "dontAsk",
+            "manual"
+          ],
+          "default": "acceptEdits",
+          "description": "--permission-mode for each task. acceptEdits auto-accepts file edits and leaves commands to the allowlist."
+        },
+        "planQueue.allowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "Bash(pnpm:*)",
+            "Bash(npm:*)",
+            "Bash(npx:*)",
+            "Bash(node:*)",
+            "Bash(git:*)",
+            "Bash(gh:*)",
+            "Bash(rg:*)",
+            "Bash(grep:*)",
+            "Bash(find:*)",
+            "Bash(ls:*)",
+            "Bash(cat:*)",
+            "Bash(head:*)",
+            "Bash(tail:*)",
+            "Bash(sed:*)",
+            "Bash(awk:*)",
+            "Bash(wc:*)",
+            "Bash(mkdir:*)",
+            "Bash(cp:*)",
+            "Bash(mv:*)",
+            "Bash(touch:*)",
+            "Bash(diff:*)",
+            "Bash(jq:*)",
+            "Bash(curl:*)",
+            "Bash(docker:*)",
+            "Bash(ssh:*)",
+            "Bash(scp:*)",
+            "Bash(rsync:*)",
+            "Bash(python3:*)",
+            "Bash(uv:*)",
+            "Bash(pytest:*)",
+            "Bash(chmod:*)",
+            "Bash(test:*)",
+            "Bash(echo:*)",
+            "Bash(pwd)"
+          ],
+          "description": "Tools allowed without a prompt. Anything not listed is denied outright, so an unattended task fails loudly instead of waiting for an answer nobody will give."
+        },
+        "planQueue.budgetUsd": {
+          "type": "number",
+          "default": 0,
+          "description": "Per-task ceiling passed to --max-budget-usd. 0 means no ceiling."
+        },
+        "planQueue.gateCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Shell command run in the workspace after each task. A non-zero exit fails the task. Empty runs nothing."
+        },
+        "planQueue.stopOnFailure": {
+          "type": "boolean",
+          "default": true,
+          "description": "Halt the queue when a task is blocked or its gate fails."
+        },
+        "planQueue.requireSentinel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Treat a task as done only when it ends with PLAN_QUEUE: DONE. With this off, exit code 0 is enough."
+        },
+        "planQueue.useAgentFromPlan": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pass the agent named in a task heading to --agent when this install has it. When it does not, the role is named in the prompt instead."
+        },
+        "planQueue.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments appended to every claude invocation."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
+    "test": "node --test test/parse.test.mjs",
+    "pretest": "npx esbuild src/plan.ts --bundle --platform=node --format=esm --outfile=out/plan.mjs --log-level=error"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2"
+  }
+}
