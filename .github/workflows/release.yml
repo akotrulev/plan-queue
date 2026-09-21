@@ -10,8 +10,12 @@
 #
 # Requires one repository secret:
 #   VSCE_PAT — an Azure DevOps personal access token, Organization "All
-#   accessible organizations", Scopes: Marketplace → Manage. Create it at
-#   https://dev.azure.com (User settings → Personal access tokens), then
+#   accessible organizations", Scopes: Marketplace → Manage.
+#
+#   Sign in at https://aex.dev.azure.com/me — NOT https://dev.azure.com, which
+#   redirects signed-out visitors to a marketing page — and create a free
+#   organization if you have none. The token page is then
+#   https://dev.azure.com/<org>/_usersSettings/tokens. Store it with
 #   `gh secret set VSCE_PAT`.
 #
 # Azure DevOps retires global PATs on 2026-12-01. After that the route is a
