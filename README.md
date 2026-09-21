@@ -24,6 +24,16 @@ wait, `/clear`, paste the next one.
 
 ## Install
 
+Search **Plan Queue** in the Extensions view (`cmd+shift+X`), or:
+
+```
+code --install-extension akotrulev.plan-queue
+```
+
+Updates then arrive automatically wherever you have it installed.
+
+### From source
+
 ```
 git clone https://github.com/akotrulev/plan-queue ~/projects/plan-queue
 cd ~/projects/plan-queue && npm install && npm run package
@@ -67,6 +77,11 @@ Each task is one `claude -p` invocation, so each gets a genuinely fresh context.
 - **Run from here** starts at the task you picked; **Run this task only** runs
   exactly one.
 - **Stop** kills the running task and leaves it pending.
+- **Message the running task** (the speech-bubble button in the view title, `cmd+alt+m` /
+  `ctrl+alt+m`, or the command palette) types into the task already in flight —
+  the same as interjecting in an interactive session. The task's stdin stays
+  open for the whole run, so the message lands in the turn that is running, not
+  after it. What you send is echoed into the log with a `>` prefix.
 
 A task counts as done only when its final message ends with `PLAN_QUEUE: DONE`
 — an appended system prompt asks for it. `PLAN_QUEUE: BLOCKED <reason>`, a

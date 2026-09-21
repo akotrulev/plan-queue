@@ -19,6 +19,14 @@ export class Queue {
     return this.handle !== undefined
   }
 
+  /**
+   * Send a message to the task running right now. False when nothing is
+   * running, or the task is already past the point of taking input.
+   */
+  send(text: string): boolean {
+    return this.handle?.send(text) ?? false
+  }
+
   stop(): void {
     this.stopRequested = true
     this.handle?.cancel()

@@ -1,7 +1,14 @@
 .vscode/**
+.github/**
 src/**
+test/**
 node_modules/**
 esbuild.mjs
 tsconfig.json
+package-lock.json
+media/icon.svg
+out/plan.mjs
 **/*.map
 **/*.ts
+**/*.vsix
+.gitignore
