@@ -1,31 +1,31 @@
-# Builds the extension on a v* tag and attaches the vsix to a GitHub release.
+# Publishes to the VS Code Marketplace on a push to main — but only when the
+# version in package.json differs from what the Marketplace is already serving.
+# So the release gesture is a version bump:
 #
-#   npm version minor && git push --follow-tags
+#   npm version patch && git push --follow-tags
 #
-# It deliberately does NOT publish to the Marketplace: releases are uploaded by
-# hand at https://marketplace.visualstudio.com/manage/publishers/akotrulev
-# (the extension's own "Update" action — "New extension" is only for the first
-# publish and errors with "already exists" afterwards).
+# Every other push to main builds, typechecks and tests, then stops. This is
+# deliberate: the Marketplace rejects a re-upload of a version it already has,
+# so publishing on every push would fail on every push that isn't a bump.
 #
-# To automate that step later, add a repository secret VSCE_PAT — an Azure
-# DevOps token scoped to Marketplace → Manage, all accessible organizations —
-# and append:
+# Requires one repository secret:
+#   VSCE_PAT — an Azure DevOps personal access token, Organization "All
+#   accessible organizations", Scopes: Marketplace → Manage. Create it at
+#   https://dev.azure.com (User settings → Personal access tokens), then
+#   `gh secret set VSCE_PAT`.
 #
-#   - run: npx --yes @vscode/vsce publish --no-dependencies --packagePath plan-queue.vsix
-#     env:
-#       VSCE_PAT: ${{ secrets.VSCE_PAT }}
-#
-# Note that Azure DevOps retires global PATs on 2026-12-01; after that the
-# route is a Microsoft Entra identity and `vsce publish --azure-credential`.
+# Azure DevOps retires global PATs on 2026-12-01. After that the route is a
+# Microsoft Entra identity with a federated credential trusting this repo,
+# azure/login, and `vsce publish --azure-credential` in place of the env var.
 name: release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -38,6 +38,45 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix
-      - uses: softprops/action-gh-release@v2
+
+      # The Marketplace is the source of truth for what is already out there —
+      # cheaper and more honest than trusting a tag to exist.
+      - name: Is this version already published?
+        id: check
+        run: |
+          set -euo pipefail
+          local_version=$(node -p "require('./package.json').version")
+          published=$(curl -sS -X POST \
+            https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery \
+            -H 'Accept: application/json;api-version=7.2-preview.1' \
+            -H 'Content-Type: application/json' \
+            -d '{"filters":[{"criteria":[{"filterType":7,"value":"akotrulev.plan-queue"}]}],"flags":914}' \
+            | node -e "
+              let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+                const x=JSON.parse(s).results[0].extensions;
+                console.log(x.length ? x[0].versions[0].version : 'none');
+              })")
+          echo "local=$local_version"  >> "$GITHUB_OUTPUT"
+          echo "published=$published"  >> "$GITHUB_OUTPUT"
+          if [ "$local_version" = "$published" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$local_version is already on the Marketplace — built and tested, nothing to publish."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::publishing $local_version (Marketplace has $published)"
+          fi
+
+      - name: Publish to the Marketplace
+        if: steps.check.outputs.publish == 'true'
+        run: npx --yes @vscode/vsce publish --no-dependencies --packagePath plan-queue.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Tag the release and attach the vsix
+        if: steps.check.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.check.outputs.local }}
+          name: v${{ steps.check.outputs.local }}
           files: plan-queue.vsix
+          generate_release_notes: true

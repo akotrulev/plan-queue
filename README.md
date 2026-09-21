@@ -42,6 +42,14 @@ code --install-extension plan-queue.vsix
 
 `npm run package` also typechecks and runs the parser tests.
 
+### Releasing
+
+`npm version patch && git push --follow-tags`. The release workflow publishes
+to the Marketplace only when `package.json`'s version differs from what the
+Marketplace already serves, so ordinary pushes to `main` just build and test.
+It needs a `VSCE_PAT` repository secret; without one, a version bump fails at
+the publish step and you can upload the vsix by hand instead.
+
 ## What it reads
 
 Any file matching `planQueue.planGlob` (default `docs/plans/**/*.md`) that has a
