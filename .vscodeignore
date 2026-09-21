@@ -12,3 +12,4 @@ out/plan.mjs
 **/*.ts
 **/*.vsix
 .gitignore
+scripts/**

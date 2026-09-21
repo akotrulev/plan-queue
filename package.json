@@ -442,6 +442,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
+    "release": "node scripts/release.mjs",
     "test": "node --test test/parse.test.mjs",
     "pretest": "npx esbuild src/plan.ts --bundle --platform=node --format=esm --outfile=out/plan.mjs --log-level=error",
     "publish": "npx --yes @vscode/vsce publish --no-dependencies",
