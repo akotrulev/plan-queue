@@ -93,6 +93,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     vscode.commands.registerCommand('planQueue.stop', () => queue.stop()),
 
+    vscode.commands.registerCommand('planQueue.sendMessage', async (text?: string) => {
+      if (!queue.running) {
+        void vscode.window.showWarningMessage('Plan Queue is not running a task.')
+        return
+      }
+      const message =
+        text ??
+        (await vscode.window.showInputBox({
+          title: 'Message the running task',
+          prompt: 'Goes to the task in flight, like typing into its session.',
+          placeHolder: 'e.g. skip the migration for now, just stub it',
+          ignoreFocusOut: true,
+        }))
+      if (!message?.trim()) return
+      if (!queue.send(message)) {
+        void vscode.window.showWarningMessage(
+          'Plan Queue could not deliver that — the task is no longer taking input.',
+        )
+        return
+      }
+      out.show(true)
+    }),
+
     vscode.commands.registerCommand('planQueue.toggleSkip', async (node?: Node) => {
       const t = asTask(node)
       if (!t) return
