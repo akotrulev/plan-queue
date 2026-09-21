@@ -1,11 +1,22 @@
-# Publishes to the VS Code Marketplace when a v* tag is pushed.
+# Builds the extension on a v* tag and attaches the vsix to a GitHub release.
 #
 #   npm version minor && git push --follow-tags
 #
-# Needs one repository secret: VSCE_PAT — an Azure DevOps personal access token
-# with Marketplace → Manage, scoped to all accessible organizations.
-# OVSX_TOKEN is optional; when it is set the same build also goes to Open VSX,
-# which is where Cursor, Windsurf and VSCodium look.
+# It deliberately does NOT publish to the Marketplace: releases are uploaded by
+# hand at https://marketplace.visualstudio.com/manage/publishers/akotrulev
+# (the extension's own "Update" action — "New extension" is only for the first
+# publish and errors with "already exists" afterwards).
+#
+# To automate that step later, add a repository secret VSCE_PAT — an Azure
+# DevOps token scoped to Marketplace → Manage, all accessible organizations —
+# and append:
+#
+#   - run: npx --yes @vscode/vsce publish --no-dependencies --packagePath plan-queue.vsix
+#     env:
+#       VSCE_PAT: ${{ secrets.VSCE_PAT }}
+#
+# Note that Azure DevOps retires global PATs on 2026-12-01; after that the
+# route is a Microsoft Entra identity and `vsce publish --azure-credential`.
 name: release
 
 on:
@@ -14,7 +25,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,19 +38,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix
-
-      - name: Publish to the VS Code Marketplace
-        run: npx --yes @vscode/vsce publish --no-dependencies --packagePath plan-queue.vsix
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
-      - name: Publish to Open VSX
-        if: ${{ env.OVSX_TOKEN != '' }}
-        run: npx --yes ovsx publish plan-queue.vsix
-        env:
-          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
-
-      - name: Attach the vsix to a GitHub release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: plan-queue.vsix
