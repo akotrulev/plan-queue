@@ -9,7 +9,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const state = new StateStore(context.workspaceState)
   await state.clearRunning()
 
-  const out = vscode.window.createOutputChannel('Plan Queue')
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100)
   status.command = 'planQueue.showLog'
 
@@ -21,7 +20,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     showCollapseAll: true,
   })
 
-  const queue = new Queue(state, tree, out, status)
+  const queue = new Queue(state, tree, status)
+  tree.isRunning = (planPath) => queue.isRunning(planPath)
   await vscode.commands.executeCommand('setContext', 'planQueue.running', false)
 
   // A plan edited by hand — or rewritten by the task before this one — shows up
@@ -52,7 +52,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const reorder = async (node: Node | undefined, delta: number) => {
     const t = asTask(node)
     if (!t) return
-    const plan = await readPlan(t.plan.path)
+    const plan = await readPlan(state.livePlanPath(t.plan.path), t.plan.path)
     const order = state.ordered(plan).map((x) => x.id)
     const i = order.indexOf(t.task.id)
     const j = i + delta
@@ -62,8 +62,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     tree.refresh()
   }
 
+  /**
+   * Answer a task that is waiting on a question. The log is shown first, since
+   * the question in full is there; the box carries its last lines.
+   */
+  const askReply = async (planPath: string, taskId: string) => {
+    const st = state.get(planPath, taskId)
+    if (st.status !== 'waiting') {
+      void vscode.window.showInformationMessage(`Plan Queue — ${taskId} is not waiting for a reply.`)
+      return
+    }
+    queue.showLog(planPath)
+    const gist = (st.question ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(-2)
+      .join(' ')
+    const text = await vscode.window.showInputBox({
+      title: `Reply to ${taskId}`,
+      prompt: gist.length > 300 ? '…' + gist.slice(-300) : gist || 'The task is waiting for your answer.',
+      placeHolder: 'Your answer; the task carries on in the same session',
+      ignoreFocusOut: true,
+    })
+    if (!text?.trim()) return
+    if (!queue.reply(planPath, taskId, text)) {
+      void vscode.window.showWarningMessage(`Plan Queue — ${taskId} is no longer waiting for a reply.`)
+    }
+  }
+
   context.subscriptions.push(
-    out,
+    queue,
     status,
     view,
     watcher,
@@ -74,7 +103,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.commands.executeCommand('workbench.action.openSettings', 'planQueue'),
     ),
 
-    vscode.commands.registerCommand('planQueue.showLog', () => out.show()),
+    vscode.commands.registerCommand('planQueue.showLog', (node?: Node) => queue.showLog(node?.plan.path)),
 
     vscode.commands.registerCommand('planQueue.runQueue', async (node?: Node) => {
       const path = await resolvePlanPath(node)
@@ -93,9 +122,59 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     vscode.commands.registerCommand('planQueue.stop', () => queue.stop()),
 
+    vscode.commands.registerCommand('planQueue.stopPlan', (node?: Node) => {
+      if (node) queue.stop(node.plan.path)
+    }),
+
+    vscode.commands.registerCommand('planQueue.openWorktree', async (node?: Node) => {
+      const wt = node && state.worktree(node.plan.path)
+      if (wt) await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(wt.dir), { forceNewWindow: true })
+    }),
+
+    vscode.commands.registerCommand('planQueue.discardWorktree', async (node?: Node) => {
+      const wt = node && state.worktree(node.plan.path)
+      if (!wt || queue.isRunning(node.plan.path)) return
+      const yes = await vscode.window.showWarningMessage(
+        `Delete the worktree at ${wt.dir} and the branch ${wt.branch}? Work on it that is not merged is lost. Task statuses are kept.`,
+        { modal: true },
+        'Discard',
+      )
+      if (yes === 'Discard') await queue.discardWorktree(node.plan.path)
+    }),
+
+    vscode.commands.registerCommand(
+      'planQueue.reply',
+      async (arg?: Node | { planPath: string; taskId: string }) => {
+        // From the tree it is a node; from the "is asking" notification, plain ids.
+        const t = arg && 'kind' in arg ? asTask(arg) : undefined
+        const target = t ? { planPath: t.plan.path, taskId: t.task.id } : arg && !('kind' in arg) ? arg : undefined
+        if (target) await askReply(target.planPath, target.taskId)
+      },
+    ),
+
     vscode.commands.registerCommand('planQueue.sendMessage', async (text?: string) => {
-      if (!queue.running) {
+      const active = queue.active
+      if (!active.length) {
         void vscode.window.showWarningMessage('Plan Queue is not running a task.')
+        return
+      }
+      const target =
+        active.length === 1
+          ? active[0]
+          : (
+              await vscode.window.showQuickPick(
+                active.map((r) => ({
+                  label: r.task ? `${r.task.id} — ${r.task.title}` : 'preparing',
+                  description: r.waiting ? `${r.title} · waiting for your reply` : r.title,
+                  run: r,
+                })),
+                { placeHolder: 'Which running task?' },
+              )
+            )?.run
+      if (!target) return
+      // A task that asked something gets the reply box, with its question.
+      if (target.waiting && target.task && text === undefined) {
+        await askReply(target.planPath, target.task.id)
         return
       }
       const message =
@@ -107,13 +186,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ignoreFocusOut: true,
         }))
       if (!message?.trim()) return
-      if (!queue.send(message)) {
+      if (!queue.send(target.planPath, message)) {
         void vscode.window.showWarningMessage(
           'Plan Queue could not deliver that — the task is no longer taking input.',
         )
         return
       }
-      out.show(true)
+      queue.showLog(target.planPath)
     }),
 
     vscode.commands.registerCommand('planQueue.toggleSkip', async (node?: Node) => {
@@ -133,6 +212,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await state.set(t.plan.path, t.task.id, {
         status: 'done',
         reason: undefined,
+        question: undefined,
         ranHash: t.task.hash,
       })
       tree.refresh()
@@ -144,6 +224,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await state.set(t.plan.path, t.task.id, {
         status: 'pending',
         reason: undefined,
+        question: undefined,
         ranHash: undefined,
         costUsd: undefined,
         durationMs: undefined,
@@ -177,10 +258,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('planQueue.openPrompt', async (node?: Node) => {
       const t = asTask(node)
       if (!t) return
-      const doc = await vscode.workspace.openTextDocument(t.plan.path)
+      // While the plan has a worktree, its copy there is the one tasks read.
+      const live = state.livePlanPath(t.plan.path)
+      const doc = await vscode.workspace.openTextDocument(live)
       const editor = await vscode.window.showTextDocument(doc, { preview: true })
       // Re-find the heading: the line may have moved since the tree was built.
-      const fresh = (await readPlan(t.plan.path)).tasks.find((x) => x.id === t.task.id)
+      const fresh = (await readPlan(live, t.plan.path)).tasks.find((x) => x.id === t.task.id)
       const line = Math.max(0, (fresh?.line ?? t.task.line) - 1)
       const pos = new vscode.Position(line, 0)
       editor.selection = new vscode.Selection(pos, pos)
@@ -191,10 +274,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const t = asTask(node)
       if (!t) return
       const cwd =
+        state.worktree(t.plan.path)?.cwd ??
         vscode.workspace.getWorkspaceFolder(vscode.Uri.file(t.plan.path))?.uri.fsPath ??
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
         process.cwd()
-      const fresh = (await readPlan(t.plan.path)).tasks.find((x) => x.id === t.task.id) ?? t.task
+      const fresh = (await readPlan(state.livePlanPath(t.plan.path), t.plan.path)).tasks.find((x) => x.id === t.task.id) ?? t.task
       const text = await composePrompt(fresh, readConfig(), cwd)
       const doc = await vscode.workspace.openTextDocument({ content: text, language: 'markdown' })
       await vscode.window.showTextDocument(doc, { preview: true })
@@ -203,5 +287,5 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
-  // Nothing: a running task is killed with the extension host.
+  // Nothing: running tasks are stopped when the queue is disposed.
 }

@@ -91,7 +91,13 @@
       },
       {
         "command": "planQueue.stop",
-        "title": "Stop the queue",
+        "title": "Stop all running plans",
+        "category": "Plan Queue",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "planQueue.stopPlan",
+        "title": "Stop this plan",
         "category": "Plan Queue",
         "icon": "$(debug-stop)"
       },
@@ -138,6 +144,12 @@
         "icon": "$(comment)"
       },
       {
+        "command": "planQueue.reply",
+        "title": "Reply to the task",
+        "category": "Plan Queue",
+        "icon": "$(reply)"
+      },
+      {
         "command": "planQueue.showLog",
         "title": "Show the task log",
         "category": "Plan Queue",
@@ -162,6 +174,18 @@
         "icon": "$(list-ordered)"
       },
       {
+        "command": "planQueue.openWorktree",
+        "title": "Open the plan's worktree in a new window",
+        "category": "Plan Queue",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "planQueue.discardWorktree",
+        "title": "Discard the plan's worktree and branch",
+        "category": "Plan Queue",
+        "icon": "$(trash)"
+      },
+      {
         "command": "planQueue.openSettings",
         "title": "Open settings",
         "category": "Plan Queue",
@@ -180,7 +204,7 @@
       "view/title": [
         {
           "command": "planQueue.runQueue",
-          "when": "view == planQueue.tasks && !planQueue.running",
+          "when": "view == planQueue.tasks",
           "group": "navigation@1"
         },
         {
@@ -207,7 +231,7 @@
       "view/item/context": [
         {
           "command": "planQueue.runFromHere",
-          "when": "view == planQueue.tasks && viewItem =~ /^task/ && !planQueue.running",
+          "when": "view == planQueue.tasks && viewItem =~ /^task.[a-z]+$/",
           "group": "inline@1"
         },
         {
@@ -217,12 +241,12 @@
         },
         {
           "command": "planQueue.runTask",
-          "when": "view == planQueue.tasks && viewItem =~ /^task/ && !planQueue.running",
+          "when": "view == planQueue.tasks && viewItem =~ /^task.[a-z]+$/",
           "group": "1_run@1"
         },
         {
           "command": "planQueue.runFromHere",
-          "when": "view == planQueue.tasks && viewItem =~ /^task/ && !planQueue.running",
+          "when": "view == planQueue.tasks && viewItem =~ /^task.[a-z]+$/",
           "group": "1_run@2"
         },
         {
@@ -262,18 +286,48 @@
         },
         {
           "command": "planQueue.runQueue",
-          "when": "view == planQueue.tasks && viewItem == plan && !planQueue.running",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan(.wt)?$/",
           "group": "inline@1"
         },
         {
           "command": "planQueue.restoreOrder",
-          "when": "view == planQueue.tasks && viewItem == plan",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan/",
           "group": "3_order@1"
         },
         {
           "command": "planQueue.resetPlan",
-          "when": "view == planQueue.tasks && viewItem == plan",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan/",
           "group": "2_state@1"
+        },
+        {
+          "command": "planQueue.stopPlan",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.live/",
+          "group": "inline@1"
+        },
+        {
+          "command": "planQueue.showLog",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan/",
+          "group": "4_show@1"
+        },
+        {
+          "command": "planQueue.openWorktree",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.*.wt$/",
+          "group": "5_worktree@1"
+        },
+        {
+          "command": "planQueue.discardWorktree",
+          "when": "view == planQueue.tasks && viewItem == plan.wt",
+          "group": "5_worktree@2"
+        },
+        {
+          "command": "planQueue.reply",
+          "when": "view == planQueue.tasks && viewItem =~ /^task.waiting/",
+          "group": "inline@0"
+        },
+        {
+          "command": "planQueue.reply",
+          "when": "view == planQueue.tasks && viewItem =~ /^task.waiting/",
+          "group": "1_run@0"
         }
       ],
       "commandPalette": [
@@ -323,6 +377,22 @@
         },
         {
           "command": "planQueue.runTask",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.stopPlan",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.openWorktree",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.discardWorktree",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.reply",
           "when": "false"
         }
       ]
@@ -408,7 +478,7 @@
         "planQueue.gateCommand": {
           "type": "string",
           "default": "",
-          "description": "Shell command run in the workspace after each task. A non-zero exit fails the task. Empty runs nothing."
+          "description": "Shell command run after each task, in the task's working folder (the plan's worktree when it has one). A non-zero exit fails the task. Empty runs nothing."
         },
         "planQueue.stopOnFailure": {
           "type": "boolean",
@@ -432,6 +502,26 @@
           },
           "default": [],
           "description": "Extra arguments appended to every claude invocation."
+        },
+        "planQueue.worktrees": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run each plan on a branch of its own in a git worktree of its own, so several plans can run at once. Each passing task is committed there; when every task is done or skipped the branch is merged into the branch it was cut from. Off, or outside a git repository, plans run in the workspace one at a time."
+        },
+        "planQueue.worktreeRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Folder the plan worktrees are created in, absolute or relative to the repository root. Empty uses a sibling folder, <repo>.plan-queue."
+        },
+        "planQueue.worktreeSetupCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Shell command run once in a new worktree before its first task, e.g. `npm ci`. A worktree starts with only what is committed, so dependencies and build output have to be recreated. Empty runs nothing."
+        },
+        "planQueue.mergeWhenDone": {
+          "type": "boolean",
+          "default": true,
+          "description": "Merge a plan's branch into its base branch (with --no-ff) once every task is done or skipped, then remove the worktree. A conflict aborts the merge and keeps the branch. Off leaves the branch for you to merge or open a PR from."
         }
       }
     }
@@ -443,8 +533,8 @@
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
     "release": "node scripts/release.mjs",
-    "test": "node --test test/parse.test.mjs",
-    "pretest": "npx esbuild src/plan.ts --bundle --platform=node --format=esm --outfile=out/plan.mjs --log-level=error",
+    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs",
+    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
     "publish": "npx --yes @vscode/vsce publish --no-dependencies",
     "publish:ovsx": "npx --yes ovsx publish plan-queue.vsix"
   },
