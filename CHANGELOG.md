@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - **Parallel plans.** Each plan runs on its own branch in its own git worktree
   (`planQueue.worktrees`, on by default), so several plans can run at once.
