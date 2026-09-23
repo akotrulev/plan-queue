@@ -133,8 +133,13 @@ export function parsePlanText(text: string, path: string): Plan {
   return { path, title, tasks }
 }
 
-export async function readPlan(path: string): Promise<Plan> {
-  return parsePlanText(await fs.readFile(path, 'utf8'), path)
+/**
+ * `as` is the path the plan is known by. It differs from `path` when the file
+ * read is the plan's copy in its worktree: status and order still key on the
+ * original.
+ */
+export async function readPlan(path: string, as: string = path): Promise<Plan> {
+  return parsePlanText(await fs.readFile(path, 'utf8'), as)
 }
 
 /** True when the file is worth listing at all. */

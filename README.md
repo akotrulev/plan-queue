@@ -84,7 +84,8 @@ Each task is one `claude -p` invocation, so each gets a genuinely fresh context.
 - **Run queue** starts at the first task that is not done or skipped.
 - **Run from here** starts at the task you picked; **Run this task only** runs
   exactly one.
-- **Stop** kills the running task and leaves it pending.
+- **Stop** kills the running task and leaves it pending — in the view title it
+  stops every running plan; on a plan, just that one.
 - **Message the running task** (the speech-bubble button in the view title, `cmd+alt+m` /
   `ctrl+alt+m`, or the command palette) types into the task already in flight —
   the same as interjecting in an interactive session. The task's stdin stays
@@ -92,14 +93,70 @@ Each task is one `claude -p` invocation, so each gets a genuinely fresh context.
   after it. What you send is echoed into the log with a `>` prefix.
 
 A task counts as done only when its final message ends with `PLAN_QUEUE: DONE`
-— an appended system prompt asks for it. `PLAN_QUEUE: BLOCKED <reason>`, a
-missing sentinel, or a non-zero exit all halt the queue with the reason on the
-task. Turn that off with `planQueue.requireSentinel` if you would rather trust
-the exit code alone.
+— an appended system prompt asks for it. `PLAN_QUEUE: BLOCKED <reason>`, running
+out of turns or budget, or a non-zero exit all halt the queue with the reason on
+the task. Turn the sentinel off with `planQueue.requireSentinel` if you would
+rather trust the exit code alone.
 
-`planQueue.gateCommand` runs after every task in the workspace root — e.g.
+### When a task asks you something
+
+A task that ends its turn with **neither** sentinel has stopped to ask a person
+something (the appended system prompt tells it to, and to do so only when it
+genuinely cannot go on). Instead of failing, the task goes to **waiting for
+reply**:
+
+- It turns yellow in the tree, its question is in the tooltip and at the end of
+  the log, and a notification shows the gist with a **Reply** button.
+- Only that plan pauses. Other plans keep running, and the plan's worktree stays
+  as it is.
+- Answer with **Reply** (the notification, the task's inline button, or
+  right-click), or with **Message the running task** / `ctrl+alt+m`, which
+  offers the reply box when the task is waiting. The answer resumes the same
+  session (`claude -p --resume <session>`) in the same folder, so the agent keeps
+  its full context. The task is then judged as usual (sentinel, gate, commit),
+  and the plan carries on.
+- Stopping the plan, or closing the window, leaves the task waiting. Reply to
+  it later and the plan starts again from that task.
+- Cost and duration add up across the turns of a task.
+
+With `planQueue.requireSentinel` off, a turn that ends cleanly is done, so a
+task cannot wait for a reply.
+
+`planQueue.gateCommand` runs after every task in the task's folder (the plan's worktree when it has one) — e.g.
 `ssh shanks "cd ~/projects/agentic-shop && pnpm test"` — and a non-zero exit
 fails the task even when the model claimed success.
+
+## Parallel plans, in worktrees
+
+With `planQueue.worktrees` on (the default) and the workspace in a git
+repository, **each plan runs on a branch of its own in a worktree of its own**,
+so you can start several plans at once. Tasks within a plan still run one after
+another, since each builds on the one before.
+
+- The first run of a plan cuts `plan-queue/<plan>-<hash>` from the branch the
+  workspace is on and checks it out under `planQueue.worktreeRoot` (default: a
+  sibling folder, `<repo>.plan-queue/`). The plan has to be committed for its
+  worktree to see it; if it is not, you are asked whether to commit just that file.
+- `planQueue.worktreeSetupCommand` (e.g. `npm ci`) runs once in a new worktree,
+  since it starts with only what is committed.
+- Every task that passes — sentinel and gate — is committed on the plan's branch.
+- When every task is done or skipped, the branch is merged into the branch it
+  was cut from with `--no-ff`, and the worktree and branch are removed. The
+  merge happens in the main checkout, which has to still be on that branch;
+  merges from plans finishing together are serialized.
+- A conflict (or the checkout having moved) aborts the merge and keeps the
+  branch and worktree. Resolve it and run the plan again: with nothing left to
+  run it retries the merge. `planQueue.mergeWhenDone` off leaves the branch for
+  you to merge or open a PR from.
+- A stopped or failed plan keeps its worktree, and the next run resumes there.
+  While it has one, the tree, *Open the prompt* and the task runs all use the
+  plan's copy in the worktree, since that is where tasks rewrite it.
+- Right-click a plan for *Stop this plan*, *Open the plan's worktree in a new
+  window*, or *Discard the plan's worktree and branch*. Each plan logs to its
+  own output channel, **Plan Queue — <plan title>**.
+
+With worktrees off, or outside a git repository, a plan runs in the workspace
+itself and only one such plan runs at a time.
 
 ## Permissions
 
@@ -130,6 +187,10 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.requireSentinel` | `true` | Require `PLAN_QUEUE: DONE` |
 | `planQueue.useAgentFromPlan` | `true` | Honour the heading's agent |
 | `planQueue.extraArgs` | `[]` | Extra `claude` arguments |
+| `planQueue.worktrees` | `true` | One worktree and branch per plan, so plans run in parallel |
+| `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>.plan-queue/` beside the repo |
+| `planQueue.worktreeSetupCommand` | — | Run once in a new worktree, e.g. `npm ci` |
+| `planQueue.mergeWhenDone` | `true` | Merge the branch back when the plan is done |
 
 ## Headless equivalent
 

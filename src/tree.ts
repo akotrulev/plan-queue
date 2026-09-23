@@ -22,10 +22,16 @@ const MIME = 'application/vnd.code.tree.planqueue'
 const ICONS: Record<Status, { icon: string; color?: string }> = {
   pending: { icon: 'circle-outline' },
   running: { icon: 'sync~spin', color: 'charts.blue' },
+  waiting: { icon: 'comment-discussion', color: 'charts.yellow' },
   done: { icon: 'pass-filled', color: 'charts.green' },
   blocked: { icon: 'error', color: 'charts.red' },
   failed: { icon: 'error', color: 'charts.red' },
   skipped: { icon: 'circle-slash', color: 'disabledForeground' },
+}
+
+/** The end of a long message, where the question is. */
+function tail(text: string, max: number): string {
+  return text.length > max ? '…' + text.slice(-max) : text
 }
 
 export class PlanTree
@@ -39,6 +45,9 @@ export class PlanTree
 
   /** Parsed plans, keyed by absolute path. Rebuilt from disk on every refresh. */
   private plans: Plan[] = []
+
+  /** Set by the queue once it exists; tells a plan being run from one at rest. */
+  isRunning: (planPath: string) => boolean = () => false
 
   constructor(private readonly state: StateStore) {}
 
@@ -86,11 +95,22 @@ export class PlanTree
         ? vscode.TreeItemCollapsibleState.Expanded
         : vscode.TreeItemCollapsibleState.Collapsed,
     )
-    item.description = `${done}/${tasks.length}`
-    item.contextValue = 'plan'
-    item.iconPath = new vscode.ThemeIcon('notebook')
+    const wt = this.state.worktree(plan.path)
+    const live = this.isRunning(plan.path)
+    item.description = `${done}/${tasks.length}${wt ? ` · ${wt.branch}` : ''}`
+    // plan[.live][.wt] — the menus key on both.
+    item.contextValue = `plan${live ? '.live' : ''}${wt ? '.wt' : ''}`
+    item.iconPath = new vscode.ThemeIcon(
+      live ? 'sync~spin' : wt ? 'git-branch' : 'notebook',
+      live ? new vscode.ThemeColor('charts.blue') : undefined,
+    )
     item.resourceUri = vscode.Uri.file(plan.path)
-    item.tooltip = plan.path
+    item.tooltip = wt
+      ? `${plan.path}
+
+Worktree: ${wt.dir}
+Branch: ${wt.branch}, merges into ${wt.base}`
+      : plan.path
     return item
   }
 
@@ -118,12 +138,14 @@ export class PlanTree
       rewritten && st.status === 'done' ? 'warning' : look.icon,
       look.color ? new vscode.ThemeColor(look.color) : undefined,
     )
-    item.contextValue = `task.${st.status}`
+    // task.<status>[.live] — run commands are hidden while the task's plan is running.
+    item.contextValue = `task.${st.status}${this.isRunning(node.plan.path) ? '.live' : ''}`
     item.tooltip = new vscode.MarkdownString(
       [
         `**${node.task.id} — ${node.task.title}**`,
         node.task.agent ? `Agent: \`${node.task.agent}\`` : '',
         `Status: ${st.status}${st.reason ? ` — ${st.reason}` : ''}`,
+        st.status === 'waiting' && st.question ? `**It asked:**\n\n${tail(st.question, 1200)}` : '',
         rewritten ? '\n⚠ The prompt changed since this task ran.' : '',
         '\n---\n',
         node.task.prompt.slice(0, 1200) + (node.task.prompt.length > 1200 ? '\n\n…' : ''),
@@ -187,8 +209,10 @@ export class PlanTree
     const plans: Plan[] = []
     for (const uri of uris) {
       try {
-        const text = await fs.readFile(uri.fsPath, 'utf8')
-        if (!looksLikeAPlan(text)) continue
+        if (!looksLikeAPlan(await fs.readFile(uri.fsPath, 'utf8'))) continue
+        // A plan with a worktree is shown as its tasks there have left it.
+        const live = this.state.livePlanPath(uri.fsPath)
+        const text = await fs.readFile(live, 'utf8').catch(() => fs.readFile(uri.fsPath, 'utf8'))
         const plan = parsePlanText(text, uri.fsPath)
         if (plan.tasks.length) plans.push(plan)
       } catch {

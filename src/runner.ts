@@ -2,12 +2,15 @@ import { spawn, type ChildProcess } from 'child_process'
 import * as vscode from 'vscode'
 import type { Task } from './plan'
 
-export const SENTINEL_OK = 'PLAN_QUEUE: DONE'
-export const SENTINEL_BAD = 'PLAN_QUEUE: BLOCKED'
+import { SENTINEL_BAD, SENTINEL_OK, verdict } from './verdict'
+
+export { SENTINEL_BAD, SENTINEL_OK }
 
 const UNATTENDED_NOTE = [
-  'You are running unattended as one task in a queue. Nobody can answer a question,',
+  'You are running unattended as one task in a queue. Nobody is watching live,',
   'so make the reasonable call and write it down rather than stopping to ask.',
+  'Only when you genuinely cannot go on without a person, end your message with the question',
+  'and neither line below: the queue pauses this task and brings the answer back to this session.',
   "Run the task's own gate before you finish.",
   `End your final message with a line that is exactly "${SENTINEL_OK}" when the task`,
   `landed and its gate passed, or "${SENTINEL_BAD} <one-line reason>" when it did not.`,
@@ -20,6 +23,16 @@ export interface RunResult {
   durationMs: number
   sessionId?: string
   cancelled?: boolean
+  /** The turn ended without either sentinel: the agent is asking something. */
+  waiting?: boolean
+  /** The agent's final message when it is waiting — the question, in context. */
+  question?: string
+}
+
+/** Continue a task's session with the person's answer instead of starting it afresh. */
+export interface Resume {
+  sessionId: string
+  reply: string
 }
 
 export interface RunConfig {
@@ -122,6 +135,7 @@ export function runTask(
   cfg: RunConfig,
   cwd: string,
   out: vscode.OutputChannel,
+  resume?: Resume,
 ): RunHandle {
   let child: ChildProcess | undefined
   let cancelled = false
@@ -141,7 +155,7 @@ export function runTask(
     const agent = cfg.useAgentFromPlan
       ? matchAgent(task.agent, await availableAgents(cfg.claudePath, cwd))
       : undefined
-    const prompt = await composePrompt(task, cfg, cwd)
+    const prompt = resume ? resume.reply : await composePrompt(task, cfg, cwd)
 
     const args = [
       '-p',
@@ -160,6 +174,7 @@ export function runTask(
       '--append-system-prompt',
       UNATTENDED_NOTE,
     ]
+    if (resume) args.push('--resume', resume.sessionId)
     if (cfg.allowedTools.length) args.push('--allowedTools', ...cfg.allowedTools)
     if (agent) args.push('--agent', agent)
     if (cfg.model) args.push('--model', cfg.model)
@@ -167,7 +182,10 @@ export function runTask(
     args.push(...cfg.extraArgs)
 
     out.appendLine('')
-    out.appendLine(`=== ${task.id} — ${task.title}  [${agent ?? task.agent ?? 'default'}]`)
+    out.appendLine(
+      `=== ${task.id} — ${task.title}  [${agent ?? task.agent ?? 'default'}]` +
+        (resume ? '  (resumed with your reply)' : ''),
+    )
     out.appendLine(`    ${new Date().toLocaleTimeString()}  ${cwd}`)
     out.appendLine('')
 
@@ -183,6 +201,7 @@ export function runTask(
     let costUsd: number | undefined
     let sessionId: string | undefined
     let stderr = ''
+    let subtype: string | undefined
 
     const write = (s: string) => {
       // The channel is line-oriented; keep streamed deltas readable rather than
@@ -219,6 +238,7 @@ export function runTask(
       } else if (msg.type === 'result') {
         flush()
         finalText = typeof msg.result === 'string' ? msg.result : finalText
+        subtype = typeof msg.subtype === 'string' ? msg.subtype : undefined
         child?.stdin?.end()
         if (typeof msg.total_cost_usd === 'number') costUsd = msg.total_cost_usd
         if (msg.session_id) sessionId = msg.session_id
@@ -257,15 +277,22 @@ export function runTask(
       return { ok: false, reason, durationMs, costUsd, sessionId }
     }
 
-    const bad = finalText.match(new RegExp(`${SENTINEL_BAD}[:\\s]*(.*)`))
-    if (bad) {
-      const reason = bad[1].trim() || 'blocked'
-      out.appendLine(`\n--- ${task.id} BLOCKED: ${reason}`)
-      return { ok: false, reason, durationMs, costUsd, sessionId }
+    const v = verdict({ finalText, subtype, sessionId, requireSentinel: cfg.requireSentinel })
+    if (v.kind === 'failed' || v.kind === 'blocked') {
+      out.appendLine(`\n--- ${task.id} ${v.kind === 'blocked' ? 'BLOCKED' : 'FAILED'}: ${v.reason}`)
+      return { ok: false, reason: v.reason, durationMs, costUsd, sessionId }
     }
-    if (cfg.requireSentinel && !finalText.includes(SENTINEL_OK)) {
-      out.appendLine(`\n--- ${task.id} FAILED: finished without ${SENTINEL_OK}`)
-      return { ok: false, reason: 'no completion sentinel', durationMs, costUsd, sessionId }
+    if (v.kind === 'waiting') {
+      out.appendLine(`\n--- ${task.id} WAITING FOR YOUR REPLY — Plan Queue: Reply to the task`)
+      return {
+        ok: false,
+        waiting: true,
+        question: v.question,
+        reason: 'waiting for reply',
+        durationMs,
+        costUsd,
+        sessionId,
+      }
     }
 
     out.appendLine(

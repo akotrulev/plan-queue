@@ -1,12 +1,15 @@
 import * as vscode from 'vscode'
+import type { Worktree } from './git'
 import type { Plan, Task } from './plan'
 
-export type Status = 'pending' | 'running' | 'done' | 'blocked' | 'failed' | 'skipped'
+export type Status = 'pending' | 'running' | 'waiting' | 'done' | 'blocked' | 'failed' | 'skipped'
 
 export interface TaskState {
   status: Status
   /** Why it is blocked or failed — the sentinel's reason, or the gate's. */
   reason?: string
+  /** What the agent asked, while the task is waiting for a reply. */
+  question?: string
   /** The prompt hash as it was when the task last ran, so a later rewrite shows up. */
   ranHash?: string
   finishedAt?: number
@@ -19,6 +22,17 @@ export interface PlanState {
   /** Task ids in the order you want them run. Ids the plan no longer has are dropped on read. */
   order: string[]
   tasks: Record<string, TaskState>
+  /** Set while the plan has a worktree of its own: from its first run until it merges. */
+  worktree?: PlanWorktree
+}
+
+export interface PlanWorktree extends Worktree {
+  /** The main checkout's top level, where the merge happens. */
+  repo: string
+  /** The plan file's copy inside the worktree — the one tasks read and rewrite. */
+  planPath: string
+  /** The workspace folder's counterpart inside the worktree; tasks run here. */
+  cwd: string
 }
 
 const KEY = 'planQueue.state.v1'
@@ -89,6 +103,23 @@ export class StateStore {
     await this.save()
   }
 
+  worktree(path: string): PlanWorktree | undefined {
+    return this.store[path]?.worktree
+  }
+
+  async setWorktree(path: string, wt: PlanWorktree | undefined): Promise<void> {
+    this.planState(path).worktree = wt
+    await this.save()
+  }
+
+  /**
+   * The copy of the plan that is current: the worktree's while the plan has
+   * one, since that is where tasks rewrite it, otherwise the file itself.
+   */
+  livePlanPath(path: string): string {
+    return this.store[path]?.worktree?.planPath ?? path
+  }
+
   async setOrder(path: string, order: string[]): Promise<void> {
     this.planState(path).order = order
     await this.save()
@@ -104,7 +135,10 @@ export class StateStore {
     await this.save()
   }
 
-  /** Clear any 'running' left behind by a window that closed mid-task. */
+  /**
+   * Clear any 'running' left behind by a window that closed mid-task. A task
+   * that is 'waiting' stays so: its session can still be answered.
+   */
   async clearRunning(): Promise<void> {
     for (const plan of Object.values(this.store)) {
       for (const [id, task] of Object.entries(plan.tasks)) {
