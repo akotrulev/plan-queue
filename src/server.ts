@@ -259,6 +259,7 @@ export class ControlServer implements vscode.Disposable {
           working: live.has(t.id) && !live.get(t.id)!.waiting ? true : undefined,
           reason: st.reason,
           question: st.status === 'waiting' ? st.question : undefined,
+          denied: st.denied?.length ? st.denied : undefined,
           costUsd: st.costUsd,
           seconds: st.durationMs ? Math.round(st.durationMs / 1000) : undefined,
         }
@@ -376,16 +377,21 @@ export class ControlServer implements vscode.Disposable {
       },
       {
         name: 'get_log',
-        description: "The last lines of a plan's log: what its tasks printed, which tools they used, gate output.",
+        description:
+          "The last lines of a plan's log — what its tasks printed, the commands they ran, failed tool calls, gate output — or, with task, that task's latest transcript, which survives a VS Code restart.",
         inputSchema: {
           type: 'object',
-          properties: { plan: planArg, lines: { type: 'number', description: 'Default 80, at most 500.' } },
+          properties: {
+            plan: planArg,
+            task: { type: 'string', description: 'Read this task\'s transcript instead of the plan\'s log.' },
+            lines: { type: 'number', description: 'Default 80, at most 500.' },
+          },
           required: ['plan'],
         },
         run: async (a) => {
           const plan = await this.resolve(a.plan)
           const n = Math.min(500, Math.max(1, Number(a.lines) || 80))
-          return { log: this.queue.tail(plan.path, n) }
+          return { log: this.queue.tail(plan.path, n, a.task ? String(a.task) : undefined) }
         },
       },
     ]

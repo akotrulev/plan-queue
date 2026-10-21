@@ -167,9 +167,21 @@
       },
       {
         "command": "planQueue.showLog",
-        "title": "Show the task log",
+        "title": "Show the log",
         "category": "Plan Queue",
         "icon": "$(output)"
+      },
+      {
+        "command": "planQueue.resumeInTerminal",
+        "title": "Resume the task's session in a terminal",
+        "category": "Plan Queue",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "planQueue.allowDenied",
+        "title": "Allow the tools this task was denied",
+        "category": "Plan Queue",
+        "icon": "$(unlock)"
       },
       {
         "command": "planQueue.moveUp",
@@ -355,6 +367,16 @@
           "command": "planQueue.reply",
           "when": "view == planQueue.tasks && viewItem =~ /^task.waiting/",
           "group": "1_run@0"
+        },
+        {
+          "command": "planQueue.resumeInTerminal",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(done|blocked|failed|waiting|pending)/",
+          "group": "4_show@3"
+        },
+        {
+          "command": "planQueue.allowDenied",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.blocked/",
+          "group": "2_state@4"
         }
       ],
       "commandPalette": [
@@ -424,6 +446,14 @@
         },
         {
           "command": "planQueue.runTaskNow",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.resumeInTerminal",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.allowDenied",
           "when": "false"
         }
       ]
@@ -517,6 +547,12 @@
           "minimum": 0,
           "description": "Kill the gate (and the worktree setup command) after this many minutes and count it as failed. 0 means no limit. Stop also kills a gate that is running."
         },
+        "planQueue.gateRetries": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "When the gate fails after a task said it was done, hand the gate's output back to the same session this many times to fix it before the task counts as blocked. 0 fails at once."
+        },
         "planQueue.stopOnFailure": {
           "type": "boolean",
           "default": true,
@@ -544,6 +580,11 @@
           },
           "default": [],
           "description": "Extra arguments appended to every claude invocation."
+        },
+        "planQueue.logThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the model's thinking in the log. Off, the log shows what it says and the tools it calls."
         },
         "planQueue.worktrees": {
           "type": "boolean",
@@ -593,8 +634,8 @@
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
     "release": "node scripts/release.mjs",
-    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs",
-    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
+    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs test/describe.test.mjs",
+    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts src/describe.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
     "publish": "npx --yes @vscode/vsce publish --no-dependencies",
     "publish:ovsx": "npx --yes ovsx publish plan-queue.vsix"
   },

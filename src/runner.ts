@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import * as vscode from 'vscode'
 import type { Task } from './plan'
 
+import { allowRuleFor, Tail, toolSummary } from './describe'
 import { SENTINEL_ASK, SENTINEL_BAD, SENTINEL_OK, verdict } from './verdict'
 
 export { SENTINEL_ASK, SENTINEL_BAD, SENTINEL_OK }
@@ -65,12 +66,24 @@ export interface RunResult {
   silent?: boolean
   /** The agent's final message when it is waiting — the question, in context. */
   question?: string
+  /** Allowlist entries that would have let through the calls this turn was denied. */
+  denied: string[]
 }
 
-/** Continue a task's session with the person's answer instead of starting it afresh. */
+/** Continue a task's session with a message, instead of starting it afresh. */
 export interface Resume {
   sessionId: string
   reply: string
+  /** Why, for the log's header: "resumed with your reply". */
+  label?: string
+}
+
+export interface TaskRunOptions {
+  resume?: Resume
+  /** Several tasks of the plan may share the tree right now. */
+  parallel?: boolean
+  /** The session's display name, so `claude --resume` can tell plans apart. */
+  sessionName?: string
 }
 
 export interface RunConfig {
@@ -83,6 +96,7 @@ export interface RunConfig {
   useAgentFromPlan: boolean
   extraArgs: string[]
   maxParallelTasks: number
+  logThinking: boolean
 }
 
 export function readConfig(): RunConfig {
@@ -97,6 +111,7 @@ export function readConfig(): RunConfig {
     useAgentFromPlan: c.get<boolean>('useAgentFromPlan', true),
     extraArgs: c.get<string[]>('extraArgs', []),
     maxParallelTasks: Math.max(1, c.get<number>('maxParallelTasks', 3)),
+    logThinking: c.get<boolean>('logThinking', false),
   }
 }
 
@@ -175,9 +190,9 @@ export function runTask(
   cfg: RunConfig,
   cwd: string,
   out: LogSink,
-  resume?: Resume,
-  parallel = false,
+  opts: TaskRunOptions = {},
 ): RunHandle {
+  const { resume, parallel = false } = opts
   let child: ChildProcess | undefined
   let cancelled = false
   // The partial output line, shared so a message sent mid-task can flush it
@@ -211,7 +226,7 @@ export function runTask(
       '--include-partial-messages',
       '--verbose',
       '--name',
-      `plan-queue ${task.id}`,
+      opts.sessionName ?? `plan-queue ${task.id}`,
       '--append-system-prompt',
       parallel ? `${UNATTENDED_NOTE} ${PARALLEL_NOTE}` : UNATTENDED_NOTE,
     ]
@@ -224,13 +239,13 @@ export function runTask(
 
     out.appendLine('')
     out.appendLine(
-      `=== ${task.id} — ${task.title}  [${agent ?? task.agent ?? 'default'}]` +
-        (resume ? '  (resumed with your reply)' : ''),
+      `=== ${task.id} — ${task.title}  [${agent || task.agent || 'default'}]` +
+        (resume ? `  (${resume.label ?? 'resumed with your reply'})` : ''),
     )
     out.appendLine(`    ${new Date().toLocaleTimeString()}  ${cwd}`)
     out.appendLine('')
 
-    if (cancelled) return { ok: false, cancelled: true, durationMs: 0, reason: 'cancelled' }
+    if (cancelled) return { ok: false, cancelled: true, durationMs: 0, reason: 'cancelled', denied: [] }
 
     child = spawn(cfg.claudePath, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: OWN_GROUP })
     // stdin stays open for the whole run so messages can be sent mid-task; it
@@ -243,20 +258,28 @@ export function runTask(
     let sessionId: string | undefined
     let stderr = ''
     let subtype: string | undefined
+    const denied: string[] = []
 
     const write = (s: string) => {
       // The channel is line-oriented; keep streamed deltas readable rather than
-      // one token per line.
+      // one token per line. Long lines break at a space, or at 160 regardless.
       for (const ch of s) {
-        if (ch === '\n' || column > 100) {
+        if (ch === '\n' || (column >= 100 && ch === ' ') || column >= 160) {
           out.appendLine(pending)
           pending = ''
           column = 0
-          if (ch === '\n') continue
+          if (ch === '\n' || ch === ' ') continue
         }
         pending += ch
         column++
       }
+    }
+
+    /** First line of a tool result's text, wherever the CLI put it. */
+    const resultText = (content: unknown): string => {
+      if (typeof content === 'string') return content
+      if (Array.isArray(content)) return content.map((c) => (typeof c?.text === 'string' ? c.text : '')).join('\n')
+      return ''
     }
 
     const handle = (line: string) => {
@@ -268,15 +291,29 @@ export function runTask(
       }
       if (msg.type === 'system' && msg.session_id) sessionId = msg.session_id
       if (msg.type === 'stream_event' && msg.event?.type === 'content_block_delta') {
-        write(msg.event.delta?.text ?? msg.event.delta?.thinking ?? '')
+        const d = msg.event.delta
+        write(d?.text ?? (cfg.logThinking ? d?.thinking : undefined) ?? '')
       } else if (msg.type === 'assistant') {
         for (const block of msg.message?.content ?? []) {
           if (block.type === 'tool_use') {
             flush()
-            out.appendLine(`  · ${block.name}`)
+            out.appendLine(`  · ${toolSummary(block.name, block.input, cwd)}`)
+          }
+        }
+      } else if (msg.type === 'user') {
+        // A tool that failed is worth a line; one that worked is already implied.
+        for (const block of Array.isArray(msg.message?.content) ? msg.message.content : []) {
+          if (block?.type === 'tool_result' && block.is_error) {
+            const first = resultText(block.content).trim().split('\n')[0] ?? ''
+            flush()
+            out.appendLine(`    ✗ ${first.length > 200 ? first.slice(0, 199) + '…' : first}`)
           }
         }
       } else if (msg.type === 'result') {
+        for (const d of Array.isArray(msg.permission_denials) ? msg.permission_denials : []) {
+          const rule = allowRuleFor(d)
+          if (rule && !denied.includes(rule)) denied.push(rule)
+        }
         flush()
         finalText = typeof msg.result === 'string' ? msg.result : finalText
         subtype = typeof msg.subtype === 'string' ? msg.subtype : undefined
@@ -310,21 +347,24 @@ export function runTask(
     })
     flush()
     const durationMs = Date.now() - started
+    if (denied.length) {
+      out.appendLine(`  denied (not on planQueue.allowedTools): ${denied.join(', ')}`)
+    }
 
     if (cancelled) {
       out.appendLine(`\n--- ${task.id} cancelled`)
-      return { ok: false, cancelled: true, durationMs, reason: 'cancelled', sessionId }
+      return { ok: false, cancelled: true, durationMs, reason: 'cancelled', sessionId, denied }
     }
     if (code !== 0) {
       const reason = stderr.trim().split('\n').slice(-3).join(' ') || `claude exited ${code}`
       out.appendLine(`\n--- ${task.id} FAILED: ${reason}`)
-      return { ok: false, reason, durationMs, costUsd, sessionId }
+      return { ok: false, reason, durationMs, costUsd, sessionId, denied }
     }
 
     const v = verdict({ finalText, subtype, sessionId, requireSentinel: cfg.requireSentinel })
     if (v.kind === 'failed' || v.kind === 'blocked') {
       out.appendLine(`\n--- ${task.id} ${v.kind === 'blocked' ? 'BLOCKED' : 'FAILED'}: ${v.reason}`)
-      return { ok: false, reason: v.reason, durationMs, costUsd, sessionId }
+      return { ok: false, reason: v.reason, durationMs, costUsd, sessionId, denied }
     }
     if (v.kind === 'silent') {
       out.appendLine(`\n--- ${task.id} ended without a sentinel`)
@@ -337,6 +377,7 @@ export function runTask(
         durationMs,
         costUsd,
         sessionId,
+        denied,
       }
     }
     if (v.kind === 'waiting') {
@@ -349,6 +390,7 @@ export function runTask(
         durationMs,
         costUsd,
         sessionId,
+        denied,
       }
     }
 
@@ -356,7 +398,7 @@ export function runTask(
       `\n--- ${task.id} ok${costUsd !== undefined ? `  $${costUsd.toFixed(3)}` : ''}` +
         `  ${(durationMs / 1000).toFixed(0)}s`,
     )
-    return { ok: true, durationMs, costUsd, sessionId }
+    return { ok: true, durationMs, costUsd, sessionId, denied }
   })()
 
   return {
@@ -385,39 +427,63 @@ export interface GateOptions {
   signal?: AbortSignal
 }
 
+export interface GateResult {
+  ok: boolean
+  /** The end of what it printed, for handing back to the task. */
+  output: string
+  timedOut?: boolean
+  stopped?: boolean
+}
+
 /**
  * A shell command that passes or fails — the post-task gate, or a worktree's
  * setup. Runs in its own process group, so a timeout or a stop takes down
  * everything it started.
  */
-export function runGate(command: string, cwd: string, out: LogSink, opts: GateOptions = {}): Promise<boolean> {
+export function runGate(command: string, cwd: string, out: LogSink, opts: GateOptions = {}): Promise<GateResult> {
   return new Promise((resolve) => {
-    if (opts.signal?.aborted) return resolve(false)
+    if (opts.signal?.aborted) return resolve({ ok: false, output: '', stopped: true })
     out.appendLine(`  gate: ${command}`)
+    const tail = new Tail()
+    let timedOut = false
+    let stopped = false
     const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: OWN_GROUP })
     const kill = (why: string) => {
       out.appendLine(`  gate ${why}`)
+      tail.push(`\n[the queue killed the gate: ${why}]\n`)
       reap(child)
     }
     child.on('exit', () => reap(child))
     const timer =
       opts.timeoutMs && opts.timeoutMs > 0
         ? setTimeout(() => {
+            timedOut = true
             const s = Math.round(opts.timeoutMs! / 1000)
             kill(`timed out after ${s < 120 ? `${s}s` : `${Math.round(s / 60)} min`}`)
           }, opts.timeoutMs)
         : undefined
-    const onAbort = () => kill('stopped')
+    const onAbort = () => {
+      stopped = true
+      kill('stopped')
+    }
     opts.signal?.addEventListener('abort', onAbort, { once: true })
 
-    child.stdout.on('data', (d: Buffer) => out.append(d.toString()))
-    child.stderr.on('data', (d: Buffer) => out.append(d.toString()))
+    const take = (d: Buffer) => {
+      const text = d.toString()
+      out.append(text)
+      tail.push(text)
+    }
+    child.stdout.on('data', take)
+    child.stderr.on('data', take)
     const done = (ok: boolean) => {
       if (timer) clearTimeout(timer)
       opts.signal?.removeEventListener('abort', onAbort)
-      resolve(ok)
+      resolve({ ok, output: tail.toString(), timedOut, stopped })
     }
-    child.on('error', () => done(false))
-    child.on('close', (code) => done(code === 0))
+    child.on('error', (e) => {
+      tail.push(String(e))
+      done(false)
+    })
+    child.on('close', (code) => done(code === 0 && !timedOut && !stopped))
   })
 }

@@ -14,7 +14,7 @@ const USAGE = `pq — control Plan Queue
   pq task <plan> <T3> [--now]              run one task; --now starts it beside a running plan
   pq reply <plan> <T3> <text...>           answer a waiting task
   pq message <plan> [T3] -- <text...>      type into a task that is working
-  pq log <plan> [lines]                    tail the plan's log
+  pq log <plan> [T3] [lines]               tail the plan's log, or a task's transcript
   pq stop [plan]                           stop one plan, or all
 
 <plan> is a path, file name or title; a unique fragment is enough.
@@ -94,9 +94,12 @@ switch (cmd) {
     out = await call('message', { plan: head[0], task: head[1], text })
     break
   }
-  case 'log':
-    out = JSON.parse(await call('get_log', { plan: rest[0], lines: rest[1] ? Number(rest[1]) : undefined })).log
+  case 'log': {
+    const lines = rest.slice(1).find((x) => /^\d+$/.test(x))
+    const task = rest.slice(1).find((x) => !/^\d+$/.test(x))
+    out = JSON.parse(await call('get_log', { plan: rest[0], task, lines: lines ? Number(lines) : undefined })).log
     break
+  }
   case 'stop':
     out = await call('stop', { plan: rest[0] })
     break

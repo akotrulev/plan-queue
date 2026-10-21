@@ -3,7 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 import * as vscode from 'vscode'
 import { readPlan } from './plan'
-import { Queue } from './queue'
+import { allowTools, Queue } from './queue'
 import { composePrompt, readConfig } from './runner'
 import { ControlServer } from './server'
 import { StateStore } from './state'
@@ -24,7 +24,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     showCollapseAll: true,
   })
 
-  const queue = new Queue(state, tree, status)
+  const queue = new Queue(
+    state,
+    tree,
+    status,
+    context.storageUri ? path.join(context.storageUri.fsPath, 'logs') : undefined,
+  )
   tree.isRunning = (planPath) => queue.isRunning(planPath)
 
   const serverLog = vscode.window.createOutputChannel('Plan Queue — control')
@@ -158,7 +163,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.commands.executeCommand('workbench.action.openSettings', 'planQueue'),
     ),
 
-    vscode.commands.registerCommand('planQueue.showLog', (node?: Node) => queue.showLog(node?.plan.path)),
+    vscode.commands.registerCommand('planQueue.showLog', async (node?: Node) => {
+      // A task opens its own transcript, which outlives the window that ran it.
+      const t = asTask(node)
+      const file = t && state.get(t.plan.path, t.task.id).logFile
+      if (t && file) {
+        try {
+          await fs.access(file)
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file))
+          const editor = await vscode.window.showTextDocument(doc, { preview: true })
+          const end = new vscode.Position(doc.lineCount, 0)
+          editor.revealRange(new vscode.Range(end, end))
+          return
+        } catch {
+          // Gone: fall back to the plan's channel.
+        }
+      }
+      queue.showLog(node?.plan.path)
+    }),
+
+    vscode.commands.registerCommand('planQueue.resumeInTerminal', async (node?: Node) => {
+      const t = asTask(node)
+      if (!t) return
+      const st = state.get(t.plan.path, t.task.id)
+      if (!st.sessionId) {
+        void vscode.window.showInformationMessage(`Plan Queue — ${t.task.id} has no session to resume yet.`)
+        return
+      }
+      if (queue.liveTasks(t.plan.path).some((l) => l.task.id === t.task.id)) {
+        void vscode.window.showWarningMessage(
+          `Plan Queue — ${t.task.id} is still held by the queue. Stop the plan first, then resume it here.`,
+        )
+        return
+      }
+      const cwd =
+        state.worktree(t.plan.path)?.cwd ??
+        vscode.workspace.getWorkspaceFolder(vscode.Uri.file(t.plan.path))?.uri.fsPath ??
+        vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+      const terminal = vscode.window.createTerminal({ name: `Claude — ${t.task.id}`, cwd })
+      terminal.show()
+      terminal.sendText(`${readConfig().claudePath} --resume ${st.sessionId}`)
+      if (st.status !== 'done') {
+        void vscode.window.showInformationMessage(
+          `Plan Queue — when you have finished ${t.task.id} by hand, mark it done (or reset it) so the queue moves on.`,
+        )
+      }
+    }),
+
+    vscode.commands.registerCommand('planQueue.allowDenied', async (node?: Node) => {
+      const t = asTask(node)
+      const denied = t ? state.get(t.plan.path, t.task.id).denied ?? [] : []
+      if (!denied.length) {
+        void vscode.window.showInformationMessage('Plan Queue — this task was not denied anything.')
+        return
+      }
+      await allowTools(denied)
+    }),
 
     vscode.commands.registerCommand('planQueue.runQueue', async (node?: Node) => {
       const path = await resolvePlanPath(node)
