@@ -251,6 +251,11 @@ pq log storefront 120
 
 ## Permissions
 
+Plan Queue does nothing in an **untrusted** workspace (VS Code's Workspace
+Trust): a plan's prompts run with file edits and an allowlist of shell commands,
+and `gateCommand`, `worktreeSetupCommand`, `claudePath` and `extraArgs` can come
+from the folder's own `.vscode/settings.json`. Trust the folder first.
+
 The default is `--permission-mode acceptEdits` with `--permission-prompts none`
 and an allowlist (`planQueue.allowedTools`). File edits are accepted, allowlisted
 commands run, and **anything else is denied outright rather than waiting** — so

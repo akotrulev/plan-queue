@@ -39,6 +39,16 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Plan Queue runs Claude Code with file edits and an allowlist of shell commands on the prompts in a plan file, and runs shell commands from workspace settings. Trust the folder first."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Plan Queue needs a real folder to run Claude Code and git in."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
