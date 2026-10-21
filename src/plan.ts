@@ -9,6 +9,12 @@ export interface Task {
   agent: string
   /** The blockquote body, unwrapped. This is the prompt, verbatim. */
   prompt: string
+  /**
+   * Ids named by a `Depends on:` line in the prompt. Undefined when the prompt
+   * declares none, which means "after everything before me"; an empty list
+   * (`Depends on: none`) means "free to start now".
+   */
+  deps?: string[]
   /** sha1 of the prompt, so a task rewritten by an earlier task is visible as changed. */
   hash: string
   /** 1-based line of the task's heading, for "open the prompt in the plan". */
@@ -25,6 +31,22 @@ export interface Plan {
 const PROMPTS_HEADING = /^##\s+Prompts\b/i
 const TASK_HEADING = /^###\s+(.+)$/
 const ANY_H2 = /^##\s/
+
+const DEPENDS_ON = /^\s*(?:[-*]\s+)?\**\s*depends\s+on\s*:?\s*\**\s*:?\s*(.+?)\s*$/im
+const NOTHING = /^(none|nothing|nil|n\/a|-|—|–)$/i
+
+/** The ids on a `Depends on:` line, or undefined when the prompt has none. */
+export function parseDeps(prompt: string): string[] | undefined {
+  const m = prompt.match(DEPENDS_ON)
+  if (!m) return undefined
+  const tokens = m[1]
+    .replace(/[`*_()\[\]]/g, ' ')
+    .split(/[\s,;&]+/)
+    .map((t) => t.replace(/[.:]+$/, ''))
+    .filter(Boolean)
+  if (tokens.length === 1 && NOTHING.test(tokens[0])) return []
+  return tokens.filter((t) => !/^(and|the|task|tasks|prompt|prompts)$/i.test(t))
+}
 
 /** "T3 — the PDP, the cart page (`fe-react`, `fe`)" -> id, title, agent. */
 function parseHeading(text: string): { id: string; title: string; agent: string } {
@@ -101,6 +123,7 @@ export function parsePlanText(text: string, path: string): Plan {
       tasks.push({
         ...current,
         prompt,
+        deps: parseDeps(prompt),
         hash: crypto.createHash('sha1').update(prompt).digest('hex').slice(0, 12),
       })
     }

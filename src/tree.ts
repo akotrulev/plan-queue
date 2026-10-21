@@ -144,6 +144,7 @@ Branch: ${wt.branch}, merges into ${wt.base}`
       [
         `**${node.task.id} — ${node.task.title}**`,
         node.task.agent ? `Agent: \`${node.task.agent}\`` : '',
+        node.task.deps ? `Depends on: ${node.task.deps.join(', ') || 'nothing — starts at once'}` : '',
         `Status: ${st.status}${st.reason ? ` — ${st.reason}` : ''}`,
         st.status === 'waiting' && st.question ? `**It asked:**\n\n${tail(st.question, 1200)}` : '',
         rewritten ? '\n⚠ The prompt changed since this task ran.' : '',

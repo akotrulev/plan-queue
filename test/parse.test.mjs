@@ -76,3 +76,18 @@ test('a heading with prose but no prompt is not a task', () => {
   const p = parsePlanText('## Prompts\n\n### B1, C1, C2\n\nWrite these when their triggers fire.\n', '/x/p.md')
   assert.deepEqual(p.tasks, [])
 })
+
+test('reads a Depends on line, in the shapes plans write it', () => {
+  const dep = (line) =>
+    parsePlanText(`## Prompts\n\n### T2 — x\n\n> Do it.\n> ${line}\n`, '/x/p.md').tasks[0].deps
+  assert.deepEqual(dep('Depends on: T1'), ['T1'])
+  assert.deepEqual(dep('**Depends on:** T1, T3b'), ['T1', 'T3b'])
+  assert.deepEqual(dep('- Depends on: `T1` and `T2`.'), ['T1', 'T2'])
+  assert.deepEqual(dep('Depends on: none'), [])
+  assert.deepEqual(dep('Depends on: —'), [])
+})
+
+test('a task with no Depends on line has no deps, which is not the same as none', () => {
+  const [t] = parsePlanText('## Prompts\n\n### T1 — x\n\n> Do it, and it depends on the schema being there.\n', '/x/p.md').tasks
+  assert.equal(t.deps, undefined)
+})
