@@ -10,10 +10,12 @@ import {
   removeWorktree,
   repoRoot,
   slugFor,
+  stashAll,
 } from './git'
 import { readPlan, type Task } from './plan'
 import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
 import { readyTasks, unknownDeps } from './schedule'
+import { NUDGE } from './verdict'
 import type { PlanWorktree, StateStore } from './state'
 import type { PlanTree } from './tree'
 
@@ -98,6 +100,10 @@ interface Run {
   initialReply?: { taskId: string; text: string }
   /** Passed, but not yet committed because another task was still working in the tree. */
   uncommitted: { id: string; title: string }[]
+  /** Did not pass, and may have left changes in the tree that nobody has put away yet. */
+  leftovers: string[]
+  /** Aborted on stop: kills gates and setup commands mid-run. */
+  abort: AbortController
   gitLock: Promise<unknown>
   gateLock: Promise<unknown>
   ran: number
@@ -213,6 +219,7 @@ export class Queue implements vscode.Disposable {
     for (const run of this.runs.values()) {
       if (planPath && run.planPath !== planPath) continue
       run.stopRequested = true
+      run.abort.abort()
       for (const live of run.live.values()) {
         live.handle?.cancel()
         // A task paused on a question stops too; it stays waiting.
@@ -324,6 +331,8 @@ export class Queue implements vscode.Disposable {
       initialReply:
         opts.reply !== undefined && opts.fromId ? { taskId: opts.fromId, text: opts.reply } : undefined,
       uncommitted: [],
+      leftovers: [],
+      abort: new AbortController(),
       gitLock: Promise.resolve(),
       gateLock: Promise.resolve(),
       ran: 0,
@@ -453,13 +462,20 @@ export class Queue implements vscode.Disposable {
     const out = run.parallel ? tagged(run.out, task.id) : run.out
     let reply = run.initialReply?.taskId === task.id ? run.initialReply.text : undefined
     if (reply !== undefined) run.initialReply = undefined
+    // A turn with no sentinel gets one question back from the queue before a person is asked.
+    let nudge: string | undefined
+    let nudged = false
 
     for (;;) {
-      // A task that asked something picks up its own session once answered;
-      // it waits here meanwhile, and the rest of the plan, and other plans, carry on.
       const before = this.state.get(planPath, task.id)
-      let resume: Resume | undefined
-      if (before.status === 'waiting' && before.sessionId) {
+      let resume: (Resume & { kind: 'reply' | 'nudge' }) | undefined
+      if (nudge !== undefined && before.sessionId) {
+        out.appendLine('  no sentinel; asking the task whether it is done, blocked or asking something')
+        resume = { sessionId: before.sessionId, reply: nudge, kind: 'nudge' }
+        nudge = undefined
+      } else if (before.status === 'waiting' && before.sessionId) {
+        // A task that asked something picks up its own session once answered;
+        // it waits here meanwhile, and the rest of the plan, and other plans, carry on.
         live.busy = false
         this.kick(run)
         const answer = reply ?? (await this.awaitReply(run, live, before.question ?? ''))
@@ -467,7 +483,7 @@ export class Queue implements vscode.Disposable {
         live.busy = true
         if (answer === undefined) return
         out.appendLine(`  > ${answer.split('\n').join('\n  > ')}`)
-        resume = { sessionId: before.sessionId, reply: answer }
+        resume = { sessionId: before.sessionId, reply: answer, kind: 'reply' }
       }
 
       const cfg = readConfig()
@@ -487,20 +503,29 @@ export class Queue implements vscode.Disposable {
       const costUsd =
         resume && before.costUsd !== undefined && result.costUsd !== undefined
           ? before.costUsd + result.costUsd
-          : result.costUsd
+          : result.costUsd ?? (resume ? before.costUsd : undefined)
       const durationMs = result.durationMs + (resume ? before.durationMs ?? 0 : 0)
 
       if (result.cancelled) {
-        // An interrupted answer leaves the question open; a fresh task goes back to pending.
+        // An interrupted answer leaves the question open; anything else goes back to pending.
+        const reopen = resume?.kind === 'reply'
         await this.state.set(
           planPath,
           task.id,
-          resume
-            ? { status: 'waiting', reason: 'waiting for reply', question: before.question }
-            : { status: 'pending' },
+          reopen
+            ? { status: 'waiting', reason: 'waiting for reply', question: before.question, costUsd, durationMs }
+            : { status: 'pending', costUsd, durationMs },
         )
+        if (!reopen) await this.leaveBehind(run, live, out)
         await this.changed()
         return
+      }
+
+      if (result.silent && !nudged) {
+        nudged = true
+        nudge = NUDGE
+        await this.state.set(planPath, task.id, { sessionId: result.sessionId, costUsd, durationMs })
+        continue
       }
 
       if (result.waiting) {
@@ -519,13 +544,26 @@ export class Queue implements vscode.Disposable {
 
       let ok = result.ok
       let reason = result.reason
-      const gate = vscode.workspace.getConfiguration('planQueue').get<string>('gateCommand', '')
+      const c = vscode.workspace.getConfiguration('planQueue')
+      const gate = c.get<string>('gateCommand', '')
       if (ok && gate.trim()) {
         // One gate at a time: two against the same tree would each see the other's half-made edits.
-        const gated = run.gateLock.then(() => runGate(gate, run.cwd, out))
+        const gated = run.gateLock.then(() =>
+          runGate(gate, run.cwd, out, {
+            timeoutMs: c.get<number>('gateTimeoutMinutes', 30) * 60_000,
+            signal: run.abort.signal,
+          }),
+        )
         run.gateLock = gated.catch(() => undefined)
         ok = await gated
         if (!ok) reason = 'gate failed'
+        if (run.stopRequested) {
+          // Stopped mid-gate: the work is unverified, so it is not done.
+          await this.state.set(planPath, task.id, { status: 'pending', costUsd, durationMs })
+          await this.leaveBehind(run, live, out)
+          await this.changed()
+          return
+        }
       }
 
       // Each passing task lands on the plan's branch, whatever the task did about
@@ -534,13 +572,12 @@ export class Queue implements vscode.Disposable {
       live.busy = false
       if (ok && wt) {
         run.uncommitted.push({ id: task.id, title: task.title })
-        const othersWorking = [...run.live.values()].some((l) => l !== live && l.busy)
-        if (othersWorking) {
+        if ([...run.live.values()].some((l) => l !== live && l.busy)) {
           out.appendLine('  commit deferred: another task is still working in the tree')
         } else {
           try {
-            const message = await this.commitPending(run, wt)
-            if (message) out.appendLine(`  committed on ${wt.branch}: ${message}`)
+            const note = await this.settle(run, wt, false)
+            if (note) out.appendLine(`  ${note}`)
           } catch (e) {
             ok = false
             reason = `commit failed: ${e instanceof Error ? e.message : e}`
@@ -560,32 +597,69 @@ export class Queue implements vscode.Disposable {
       run.ran++
 
       if (!ok) {
-        const stopOnFailure = vscode.workspace
-          .getConfiguration('planQueue')
-          .get<boolean>('stopOnFailure', true)
+        await this.leaveBehind(run, live, out)
         void vscode.window
           .showErrorMessage(`Plan Queue — ${task.id} did not finish: ${reason ?? 'unknown'}`, 'Show log')
           .then((pick) => pick && run.out.show())
         // Tasks already going are left to finish; nothing new starts.
-        if (stopOnFailure) run.halted = true
+        if (c.get<boolean>('stopOnFailure', true)) run.halted = true
       }
       return
     }
   }
 
-  /** Commit what has passed since the last commit. One at a time: it is one index. */
-  private commitPending(run: Run, wt: PlanWorktree): Promise<string | undefined> {
+  /**
+   * A task that did not pass may have left half its work in the tree. Once
+   * nothing else is in the tree, it is stashed, so the next task — and the next
+   * commit — starts from what passed. With another task still there, it waits;
+   * whoever settles the tree last deals with it.
+   */
+  private async leaveBehind(run: Run, live: Live, out: LogSink): Promise<void> {
+    live.busy = false
+    if (!run.wt) return
+    run.leftovers.push(live.task.id)
+    if ([...run.live.values()].some((l) => l !== live)) return
+    try {
+      const note = await this.settle(run, run.wt, true)
+      if (note) out.appendLine(`  ${note}`)
+    } catch (e) {
+      out.appendLine(`  could not put away the leftovers: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  /**
+   * Commit what has passed since the last commit, or, when nothing has, stash
+   * what failed tasks left. One at a time: it is one index. Leftovers that are
+   * in the tree alongside work that passed cannot be told apart from it; that
+   * commit says so.
+   */
+  private settle(run: Run, wt: PlanWorktree, quiet: boolean): Promise<string | undefined> {
     const job = run.gitLock.then(async () => {
-      if (!run.uncommitted.length) return undefined
-      const batch = run.uncommitted.splice(0)
-      const message =
-        `plan-queue: ${batch.map((b) => b.id).join(', ')} — ${batch.map((b) => b.title).join('; ')}`
-      try {
-        return (await commitAll(wt.dir, message)) ? message : undefined
-      } catch (e) {
-        run.uncommitted.unshift(...batch)
-        throw e
+      if (run.uncommitted.length) {
+        const batch = run.uncommitted.splice(0)
+        const left = run.leftovers.splice(0)
+        const subject = `plan-queue: ${batch.map((b) => b.id).join(', ')} — ${batch.map((b) => b.title).join('; ')}`
+        const message = left.length
+          ? `${subject}\n\nAlso carries what ${left.join(', ')} left uncommitted in the same tree without passing.`
+          : subject
+        try {
+          if (!(await commitAll(wt.dir, message))) return undefined
+        } catch (e) {
+          run.uncommitted.unshift(...batch)
+          run.leftovers.unshift(...left)
+          throw e
+        }
+        return left.length
+          ? `committed on ${wt.branch}: ${subject} — WITH the leftovers of ${left.join(', ')}, which did not pass`
+          : `committed on ${wt.branch}: ${subject}`
       }
+      const stash = vscode.workspace.getConfiguration('planQueue').get<boolean>('stashFailedWork', true)
+      if (!quiet || !run.leftovers.length || !stash) return undefined
+      const left = run.leftovers.splice(0)
+      const ref = await stashAll(wt.dir, `plan-queue: leftovers of ${left.join(', ')} (${run.title})`)
+      return ref
+        ? `${left.join(', ')} left changes behind; stashed as ${ref} (git stash apply ${ref} brings them back)`
+        : undefined
     })
     run.gitLock = job.catch(() => undefined)
     return job
@@ -607,7 +681,7 @@ export class Queue implements vscode.Disposable {
       const { created } = await ensureWorktree(existing.repo, existing)
       out.appendLine(`=== ${run.title}: resuming in ${existing.dir} (${existing.branch})`)
       // Its folder was deleted and has just been checked out again, bare.
-      if (created) await this.setUp(existing, out)
+      if (created) await this.setUp(run, existing)
       return existing
     }
     if (!c.get<boolean>('worktrees', true)) return undefined
@@ -652,18 +726,23 @@ export class Queue implements vscode.Disposable {
     await ensureWorktree(repo, wt)
     out.appendLine(`=== ${run.title}: worktree ${dir} on ${wt.branch}, from ${base}`)
 
-    await this.setUp(wt, out)
+    await this.setUp(run, wt)
     // Recorded only once it is usable, so a failed setup is retried next run.
     await this.state.setWorktree(planPath, wt)
     return wt
   }
 
   /** A worktree holds only what is committed; the setup command rebuilds the rest. */
-  private async setUp(wt: PlanWorktree, out: LogSink): Promise<void> {
-    const setup = vscode.workspace.getConfiguration('planQueue').get<string>('worktreeSetupCommand', '')
+  private async setUp(run: Run, wt: PlanWorktree): Promise<void> {
+    const c = vscode.workspace.getConfiguration('planQueue')
+    const setup = c.get<string>('worktreeSetupCommand', '')
     if (!setup.trim()) return
-    out.appendLine('  setting up the worktree')
-    if (!(await runGate(setup, wt.cwd, out))) {
+    run.out.appendLine('  setting up the worktree')
+    const ok = await runGate(setup, wt.cwd, run.out, {
+      timeoutMs: c.get<number>('gateTimeoutMinutes', 30) * 60_000,
+      signal: run.abort.signal,
+    })
+    if (!ok) {
       throw new Error(`the worktree setup command failed in ${wt.cwd}`)
     }
   }

@@ -14,6 +14,7 @@ import {
   removeWorktree,
   repoRoot,
   slugFor,
+  stashAll,
 } from '../out/git.mjs'
 
 const sh = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
@@ -126,4 +127,15 @@ test('a worktree folder deleted by hand is recreated on its branch', async () =>
 
   assert.deepEqual(await ensureWorktree(repo, a), { created: true })
   assert.equal(fs.readFileSync(path.join(a.dir, 'a.txt'), 'utf8'), 'kept\n')
+})
+
+test('stashAll puts edits and new files away, and is a no-op on a clean tree', async () => {
+  const { repo } = scratchRepo()
+  assert.equal(await stashAll(repo, 'nothing'), undefined)
+  fs.writeFileSync(path.join(repo, 'README.md'), 'half-done\n')
+  fs.writeFileSync(path.join(repo, 'new.txt'), 'x\n')
+  const ref = await stashAll(repo, 'plan-queue: leftovers of T3')
+  assert.match(ref, /^[0-9a-f]{7,}$/)
+  assert.equal(sh(repo, 'status', '--porcelain'), '')
+  assert.match(sh(repo, 'stash', 'list'), /leftovers of T3/)
 })

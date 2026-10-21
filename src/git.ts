@@ -110,6 +110,18 @@ export async function commitAll(dir: string, message: string): Promise<boolean> 
   return true
 }
 
+/**
+ * Put the worktree's uncommitted changes, untracked files included, into a
+ * stash, so the next task starts from what was committed. Returns the stash's
+ * commit, or undefined when there was nothing to put away.
+ */
+export async function stashAll(dir: string, message: string): Promise<string | undefined> {
+  const status = await must(['status', '--porcelain'], dir)
+  if (!status) return undefined
+  await must(['stash', 'push', '--include-untracked', '-m', message], dir)
+  return must(['rev-parse', '--short', 'stash@{0}'], dir)
+}
+
 let mergeLock: Promise<unknown> = Promise.resolve()
 
 /**

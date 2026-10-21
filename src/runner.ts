@@ -2,19 +2,42 @@ import { spawn, type ChildProcess } from 'child_process'
 import * as vscode from 'vscode'
 import type { Task } from './plan'
 
-import { SENTINEL_BAD, SENTINEL_OK, verdict } from './verdict'
+import { SENTINEL_ASK, SENTINEL_BAD, SENTINEL_OK, verdict } from './verdict'
 
-export { SENTINEL_BAD, SENTINEL_OK }
+export { SENTINEL_ASK, SENTINEL_BAD, SENTINEL_OK }
 
 const UNATTENDED_NOTE = [
   'You are running unattended as one task in a queue. Nobody is watching live,',
   'so make the reasonable call and write it down rather than stopping to ask.',
-  'Only when you genuinely cannot go on without a person, end your message with the question',
-  'and neither line below: the queue pauses this task and brings the answer back to this session.',
-  "Run the task's own gate before you finish.",
+  "If the task defines a gate, run it before you finish.",
   `End your final message with a line that is exactly "${SENTINEL_OK}" when the task`,
   `landed and its gate passed, or "${SENTINEL_BAD} <one-line reason>" when it did not.`,
+  'Only when you genuinely cannot go on without a person, end your message with the question',
+  `and then a line that is exactly "${SENTINEL_ASK}": the queue pauses this task and brings`,
+  'the answer back to this session.',
 ].join(' ')
+
+/**
+ * Children get a process group of their own, so stopping a task also stops
+ * what it started — a dev server, a test watcher — and not only the CLI.
+ */
+const OWN_GROUP = process.platform !== 'win32'
+
+/** SIGTERM the group, then SIGKILL whatever ignored it. */
+function reap(child: ChildProcess | undefined): void {
+  killTree(child, 'SIGTERM')
+  setTimeout(() => killTree(child, 'SIGKILL'), 3000).unref()
+}
+
+function killTree(child: ChildProcess | undefined, signal: NodeJS.Signals): void {
+  if (!child?.pid) return
+  try {
+    if (OWN_GROUP) process.kill(-child.pid, signal)
+    else child.kill(signal)
+  } catch {
+    // Already gone.
+  }
+}
 
 /** Where a task's output goes: an output channel, or anything shaped like one. */
 export interface LogSink {
@@ -36,8 +59,10 @@ export interface RunResult {
   durationMs: number
   sessionId?: string
   cancelled?: boolean
-  /** The turn ended without either sentinel: the agent is asking something. */
+  /** The agent is asking a person something, or ended with no sentinel (see `silent`). */
   waiting?: boolean
+  /** No sentinel at all: the queue asks the agent once what it meant before waiting on a person. */
+  silent?: boolean
   /** The agent's final message when it is waiting — the question, in context. */
   question?: string
 }
@@ -207,7 +232,7 @@ export function runTask(
 
     if (cancelled) return { ok: false, cancelled: true, durationMs: 0, reason: 'cancelled' }
 
-    child = spawn(cfg.claudePath, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    child = spawn(cfg.claudePath, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: OWN_GROUP })
     // stdin stays open for the whole run so messages can be sent mid-task; it
     // is closed when the result arrives, which is what ends the process.
     child.stdin?.on('error', () => {})
@@ -273,6 +298,9 @@ export function runTask(
     })
     child.stderr?.on('data', (d: Buffer) => (stderr += d.toString()))
 
+    // Whatever the task left running in the background goes with it — and has
+    // to, since a leftover holding stdout open would keep 'close' from firing.
+    child.on('exit', () => reap(child))
     const code = await new Promise<number>((resolve) => {
       child!.on('error', (e) => {
         stderr += String(e)
@@ -297,6 +325,19 @@ export function runTask(
     if (v.kind === 'failed' || v.kind === 'blocked') {
       out.appendLine(`\n--- ${task.id} ${v.kind === 'blocked' ? 'BLOCKED' : 'FAILED'}: ${v.reason}`)
       return { ok: false, reason: v.reason, durationMs, costUsd, sessionId }
+    }
+    if (v.kind === 'silent') {
+      out.appendLine(`\n--- ${task.id} ended without a sentinel`)
+      return {
+        ok: false,
+        waiting: true,
+        silent: true,
+        question: v.text,
+        reason: 'no completion sentinel',
+        durationMs,
+        costUsd,
+        sessionId,
+      }
     }
     if (v.kind === 'waiting') {
       out.appendLine(`\n--- ${task.id} WAITING FOR YOUR REPLY — Plan Queue: Reply to the task`)
@@ -323,8 +364,7 @@ export function runTask(
     cancel() {
       cancelled = true
       child?.stdin?.end()
-      child?.kill('SIGTERM')
-      setTimeout(() => child?.kill('SIGKILL'), 3000)
+      reap(child)
     },
     send(text: string) {
       const trimmed = text.trim()
@@ -338,14 +378,46 @@ export function runTask(
   }
 }
 
-/** The optional post-task gate. Runs in the workspace, inherits your shell. */
-export function runGate(command: string, cwd: string, out: LogSink): Promise<boolean> {
+export interface GateOptions {
+  /** Kill it after this long and count it as failed. 0 or absent: no limit. */
+  timeoutMs?: number
+  /** Kill it when the plan is stopped. */
+  signal?: AbortSignal
+}
+
+/**
+ * A shell command that passes or fails — the post-task gate, or a worktree's
+ * setup. Runs in its own process group, so a timeout or a stop takes down
+ * everything it started.
+ */
+export function runGate(command: string, cwd: string, out: LogSink, opts: GateOptions = {}): Promise<boolean> {
   return new Promise((resolve) => {
+    if (opts.signal?.aborted) return resolve(false)
     out.appendLine(`  gate: ${command}`)
-    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: OWN_GROUP })
+    const kill = (why: string) => {
+      out.appendLine(`  gate ${why}`)
+      reap(child)
+    }
+    child.on('exit', () => reap(child))
+    const timer =
+      opts.timeoutMs && opts.timeoutMs > 0
+        ? setTimeout(() => {
+            const s = Math.round(opts.timeoutMs! / 1000)
+            kill(`timed out after ${s < 120 ? `${s}s` : `${Math.round(s / 60)} min`}`)
+          }, opts.timeoutMs)
+        : undefined
+    const onAbort = () => kill('stopped')
+    opts.signal?.addEventListener('abort', onAbort, { once: true })
+
     child.stdout.on('data', (d: Buffer) => out.append(d.toString()))
     child.stderr.on('data', (d: Buffer) => out.append(d.toString()))
-    child.on('error', () => resolve(false))
-    child.on('close', (code) => resolve(code === 0))
+    const done = (ok: boolean) => {
+      if (timer) clearTimeout(timer)
+      opts.signal?.removeEventListener('abort', onAbort)
+      resolve(ok)
+    }
+    child.on('error', () => done(false))
+    child.on('close', (code) => done(code === 0))
   })
 }

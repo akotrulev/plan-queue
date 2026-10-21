@@ -20,6 +20,25 @@
 - A fenced code block in a prompt that contains `##` or `###` lines no longer
   cuts the prompt short or drops the tasks after it.
 - Plan Queue is disabled in untrusted and virtual workspaces.
+- **A forgotten sentinel no longer stalls a plan.** A turn that ends with no
+  `PLAN_QUEUE:` line is asked once, in the same session, whether it is done,
+  blocked or asking; only a second silence waits for a person. Tasks now mark a
+  question with `PLAN_QUEUE: QUESTION`.
+- Sentinels only count on a line of their own, and the last one wins, so a
+  message that mentions one is not mistaken for it.
+- **Stop takes down the whole task.** Tasks and gates run in their own process
+  group; stopping one, or its ending, also stops the servers and watchers it
+  started.
+- `planQueue.gateTimeoutMinutes` (default 30) kills a hung gate or worktree
+  setup command; Stop kills a running gate.
+- **What a failed task leaves behind is stashed** in the plan's worktree, so it
+  no longer rides into the next task's commit (`planQueue.stashFailedWork`).
+- The cost of a stopped turn is kept.
+- A trailing `(wip)` or `(optional)` in a task heading stays in the title
+  instead of being taken for an agent.
+- A task id used by two headings is flagged on the plan; only the first runs.
+- The tree follows edits to a plan's copy in its worktree, and refreshes once
+  per burst of saves.
 - Packaging no longer ships the test builds in `out/`.
 
 ## 0.2.0

@@ -511,15 +511,26 @@
           "default": "",
           "description": "Shell command run after each task, in the task's working folder (the plan's worktree when it has one). A non-zero exit fails the task. Empty runs nothing."
         },
+        "planQueue.gateTimeoutMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "Kill the gate (and the worktree setup command) after this many minutes and count it as failed. 0 means no limit. Stop also kills a gate that is running."
+        },
         "planQueue.stopOnFailure": {
           "type": "boolean",
           "default": true,
           "description": "Halt the queue when a task is blocked or its gate fails."
         },
+        "planQueue.stashFailedWork": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a task in a plan's worktree is blocked, fails its gate or is stopped, stash what it left in the tree (git stash, untracked files included) so the next task and the next commit start from what passed. The log names the stash. Off leaves the changes in the tree, where the next passing task's commit picks them up."
+        },
         "planQueue.requireSentinel": {
           "type": "boolean",
           "default": true,
-          "description": "Treat a task as done only when it ends with PLAN_QUEUE: DONE. With this off, exit code 0 is enough."
+          "description": "Treat a task as done only when it ends with PLAN_QUEUE: DONE. A turn that ends with no sentinel is asked once whether it is done, blocked or asking something. With this off, exit code 0 is enough."
         },
         "planQueue.useAgentFromPlan": {
           "type": "boolean",

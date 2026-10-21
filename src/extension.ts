@@ -36,14 +36,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await vscode.commands.executeCommand('setContext', 'planQueue.running', false)
 
   // A plan edited by hand — or rewritten by the task before this one — shows up
-  // in the tree without a manual refresh.
-  const watcher = vscode.workspace.createFileSystemWatcher('**/*.md')
-  const onChange = (uri: vscode.Uri) => {
-    if (tree.findPlan(uri.fsPath) || uri.fsPath.includes('/plans/')) tree.refresh()
+  // in the tree without a manual refresh. Watched: the plan glob in each
+  // workspace folder, and each plan's copy in its worktree, which lives outside
+  // the workspace. A burst of saves is one refresh.
+  let refreshTimer: NodeJS.Timeout | undefined
+  const refreshSoon = () => {
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => tree.refresh(), 300)
   }
-  watcher.onDidChange(onChange)
-  watcher.onDidCreate(onChange)
-  watcher.onDidDelete(onChange)
+  const watch = (pattern: vscode.GlobPattern) => {
+    const w = vscode.workspace.createFileSystemWatcher(pattern)
+    w.onDidChange(refreshSoon)
+    w.onDidCreate(refreshSoon)
+    w.onDidDelete(refreshSoon)
+    return w
+  }
+  let planWatchers: vscode.FileSystemWatcher[] = []
+  const watchPlans = () => {
+    planWatchers.forEach((w) => w.dispose())
+    const glob = vscode.workspace.getConfiguration('planQueue').get<string>('planGlob', 'docs/plans/**/*.md')
+    planWatchers = (vscode.workspace.workspaceFolders ?? []).map((f) => watch(new vscode.RelativePattern(f, glob)))
+  }
+  watchPlans()
+  const worktreeWatchers = new Map<string, vscode.FileSystemWatcher>()
+  const watchWorktrees = () => {
+    const want = new Set(state.worktrees().map((wt) => wt.planPath))
+    for (const [p, w] of worktreeWatchers) {
+      if (!want.has(p)) {
+        w.dispose()
+        worktreeWatchers.delete(p)
+      }
+    }
+    for (const p of want) {
+      if (!worktreeWatchers.has(p)) {
+        worktreeWatchers.set(p, watch(new vscode.RelativePattern(vscode.Uri.file(path.dirname(p)), path.basename(p))))
+      }
+    }
+  }
+  watchWorktrees()
+  const treeChanged = tree.onDidChangeTreeData(() => watchWorktrees())
 
   /** The plan a command applies to: the node's, or the only one, or asked for. */
   const resolvePlanPath = async (node?: Node): Promise<string | undefined> => {
@@ -108,12 +139,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     serverLog,
     status,
     vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('planQueue.planGlob')) {
+        watchPlans()
+        tree.refresh()
+      }
       if (e.affectsConfiguration('planQueue.server')) {
         void server.stop().then(() => (serverEnabled() ? server.start() : undefined))
       }
     }),
     view,
-    watcher,
+    treeChanged,
+    { dispose: () => [...planWatchers, ...worktreeWatchers.values()].forEach((w) => w.dispose()) },
+    { dispose: () => refreshTimer && clearTimeout(refreshTimer) },
 
     vscode.commands.registerCommand('planQueue.refresh', () => tree.refresh()),
 
