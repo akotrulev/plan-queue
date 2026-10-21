@@ -17,6 +17,9 @@
   (`planQueue.server.enabled`, command *Connect Claude Code*) exposes MCP tools
   — `list_plans`, `plan_status`, `run_plan`, `run_task`, `reply`, `message`,
   `get_log`, `stop` — and a `pq` shell command that calls the same endpoint.
+- A fenced code block in a prompt that contains `##` or `###` lines no longer
+  cuts the prompt short or drops the tasks after it.
+- Plan Queue is disabled in untrusted and virtual workspaces.
 - Packaging no longer ships the test builds in `out/`.
 
 ## 0.2.0
