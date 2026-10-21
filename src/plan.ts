@@ -113,6 +113,8 @@ export function parsePlanText(text: string, path: string): Plan {
   if (h1) title = h1.replace(/^#\s+/, '').trim()
 
   let inPrompts = false
+  // Inside a code fence a `##` is content, not a heading. Fences quoted with `>` count.
+  let fence: { ch: string; len: number } | null = null
   let current: { id: string; title: string; agent: string; line: number } | null = null
   let buffer: string[] = []
 
@@ -133,6 +135,19 @@ export function parsePlanText(text: string, path: string): Plan {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
+
+    const marker = line.replace(/^(\s*>)*\s*/, '').match(/^(`{3,}|~{3,})(.*)$/)
+    if (fence) {
+      if (marker && marker[1][0] === fence.ch && marker[1].length >= fence.len && !marker[2].trim()) fence = null
+      if (inPrompts && current) buffer.push(line)
+      continue
+    }
+    // A backtick fence's info string cannot contain a backtick: that is inline code.
+    if (marker && !(marker[1][0] === '`' && marker[2].includes('`'))) {
+      fence = { ch: marker[1][0], len: marker[1].length }
+      if (inPrompts && current) buffer.push(line)
+      continue
+    }
 
     if (ANY_H2.test(line)) {
       flush()
