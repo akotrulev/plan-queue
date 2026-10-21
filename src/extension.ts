@@ -1,7 +1,11 @@
+import * as fs from 'fs/promises'
+import * as os from 'os'
+import * as path from 'path'
 import * as vscode from 'vscode'
 import { readPlan } from './plan'
 import { Queue } from './queue'
 import { composePrompt, readConfig } from './runner'
+import { ControlServer } from './server'
 import { StateStore } from './state'
 import { PlanTree, type Node, type TaskNode } from './tree'
 
@@ -22,6 +26,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const queue = new Queue(state, tree, status)
   tree.isRunning = (planPath) => queue.isRunning(planPath)
+
+  const serverLog = vscode.window.createOutputChannel('Plan Queue — control')
+  const server = new ControlServer(context, queue, tree, state, serverLog)
+  const serverEnabled = () => vscode.workspace.getConfiguration('planQueue').get<boolean>('server.enabled', false)
+  if (serverEnabled()) {
+    void server.start().then(() => installCli(context, serverLog))
+  }
   await vscode.commands.executeCommand('setContext', 'planQueue.running', false)
 
   // A plan edited by hand — or rewritten by the task before this one — shows up
@@ -93,7 +104,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     queue,
+    server,
+    serverLog,
     status,
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('planQueue.server')) {
+        void server.stop().then(() => (serverEnabled() ? server.start() : undefined))
+      }
+    }),
     view,
     watcher,
 
@@ -118,6 +136,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('planQueue.runTask', async (node?: Node) => {
       const t = asTask(node)
       if (t) await queue.run(t.plan.path, { onlyId: t.task.id })
+    }),
+
+    vscode.commands.registerCommand('planQueue.runTaskNow', async (node?: Node) => {
+      const t = asTask(node)
+      if (!t) return
+      const r = await queue.runNow(t.plan.path, t.task.id)
+      if (!r.ok && r.reason !== 'cancelled') {
+        void vscode.window.showWarningMessage(`Plan Queue — ${t.task.id} not started: ${r.reason}.`)
+      }
+    }),
+
+    vscode.commands.registerCommand('planQueue.connectClaude', async () => {
+      const pick = await vscode.window.showInformationMessage(
+        'Let Claude Code start and watch plans through Plan Queue? Any session that has this connection can run plans in this workspace, which means model calls and edits on your behalf.',
+        { modal: true },
+        'Register for all projects',
+        'Register for this project only',
+      )
+      if (!pick) return
+      await vscode.workspace
+        .getConfiguration('planQueue')
+        .update('server.enabled', true, vscode.ConfigurationTarget.Global)
+      if (!(await server.start())) {
+        void vscode.window.showErrorMessage(
+          'Plan Queue could not listen on its port. Another window may hold it; change planQueue.server.port.',
+        )
+        return
+      }
+      const cli = await installCli(context, serverLog)
+      const scope = pick === 'Register for all projects' ? 'user' : 'local'
+      const claude = readConfig().claudePath
+      const token = await server.getToken()
+      const terminal = vscode.window.createTerminal({ name: 'Plan Queue — connect', cwd: vscode.workspace.workspaceFolders?.[0]?.uri })
+      terminal.show()
+      terminal.sendText(`${claude} mcp remove plan-queue --scope ${scope} >/dev/null 2>&1; ${claude} mcp add --transport http --scope ${scope} plan-queue ${server.url} --header "Authorization: Bearer ${token}"`)
+      void vscode.window.showInformationMessage(
+        `Plan Queue is serving on ${server.url}. New Claude Code sessions will have its tools.` +
+          (cli ? ` The pq command is at ${cli}.` : ''),
+      )
     }),
 
     vscode.commands.registerCommand('planQueue.stop', () => queue.stop()),
@@ -186,7 +243,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ignoreFocusOut: true,
         }))
       if (!message?.trim()) return
-      if (!queue.send(target.planPath, message)) {
+      if (!queue.send(target.planPath, message, target.task?.id)) {
         void vscode.window.showWarningMessage(
           'Plan Queue could not deliver that — the task is no longer taking input.',
         )
@@ -288,4 +345,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export function deactivate(): void {
   // Nothing: running tasks are stopped when the queue is disposed.
+}
+
+const CLI_MARKER = '// pq — drives the Plan Queue extension'
+
+/**
+ * Put the `pq` command on the user's PATH-by-convention (~/.local/bin). The
+ * script is one self-contained file, so it is copied rather than linked and
+ * survives the extension's folder changing on update. A `pq` that is not ours
+ * is left alone.
+ */
+async function installCli(context: vscode.ExtensionContext, log: vscode.OutputChannel): Promise<string | undefined> {
+  if (process.platform === 'win32') return undefined
+  const target = path.join(os.homedir(), '.local', 'bin', 'pq')
+  try {
+    const source = await fs.readFile(context.asAbsolutePath('cli/pq.mjs'), 'utf8')
+    const existing = await fs.readFile(target, 'utf8').catch(() => undefined)
+    if (existing !== undefined && !existing.includes(CLI_MARKER)) {
+      log.appendLine(`pq: ${target} exists and is not Plan Queue's; left alone`)
+      return undefined
+    }
+    if (existing !== source) {
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      await fs.writeFile(target, source, { mode: 0o755 })
+      await fs.chmod(target, 0o755)
+    }
+    return target
+  } catch (e) {
+    log.appendLine(`pq: could not install: ${e instanceof Error ? e.message : e}`)
+    return undefined
+  }
 }

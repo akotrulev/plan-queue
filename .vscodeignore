@@ -7,7 +7,7 @@ esbuild.mjs
 tsconfig.json
 package-lock.json
 media/icon.svg
-out/plan.mjs
+out/*.mjs
 **/*.map
 **/*.ts
 **/*.vsix

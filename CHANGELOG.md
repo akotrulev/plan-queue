@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **Parallel tasks in one plan.** A task that declares `Depends on: T1, T2` in
+  its prompt starts as soon as those are done, so tasks sharing a dependency run
+  together (`planQueue.maxParallelTasks`, default 3). Plans without such lines
+  run one task at a time, as before. Tasks share the plan's working tree; passing
+  tasks are committed together once none is still working, and gates run one at
+  a time.
+- *Run this task now* starts a task alongside a running plan, ignoring
+  dependencies and the cap.
+- A task waiting for a reply no longer holds a slot, and each waiting task of a
+  plan is answered separately. *Message the running task* now asks which task
+  when several are going.
+- **Control from Claude Code.** An opt-in local endpoint
+  (`planQueue.server.enabled`, command *Connect Claude Code*) exposes MCP tools
+  — `list_plans`, `plan_status`, `run_plan`, `run_task`, `reply`, `message`,
+  `get_log`, `stop` — and a `pq` shell command that calls the same endpoint.
+- Packaging no longer ships the test builds in `out/`.
+
 ## 0.2.0
 
 - **Parallel plans.** Each plan runs on its own branch in its own git worktree

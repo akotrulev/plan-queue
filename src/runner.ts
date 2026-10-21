@@ -16,6 +16,19 @@ const UNATTENDED_NOTE = [
   `landed and its gate passed, or "${SENTINEL_BAD} <one-line reason>" when it did not.`,
 ].join(' ')
 
+/** Where a task's output goes: an output channel, or anything shaped like one. */
+export interface LogSink {
+  append(text: string): void
+  appendLine(text: string): void
+}
+
+/** Added when several tasks of one plan may be running in the same working tree. */
+const PARALLEL_NOTE = [
+  'Other tasks of this plan may be running at the same time in this same working tree.',
+  'Touch only the files your task owns. Do not run git stash, reset, checkout, clean or rebase,',
+  'and do not commit: the queue commits for you once the tasks that are running have finished.',
+].join(' ')
+
 export interface RunResult {
   ok: boolean
   reason?: string
@@ -44,6 +57,7 @@ export interface RunConfig {
   requireSentinel: boolean
   useAgentFromPlan: boolean
   extraArgs: string[]
+  maxParallelTasks: number
 }
 
 export function readConfig(): RunConfig {
@@ -57,6 +71,7 @@ export function readConfig(): RunConfig {
     requireSentinel: c.get<boolean>('requireSentinel', true),
     useAgentFromPlan: c.get<boolean>('useAgentFromPlan', true),
     extraArgs: c.get<string[]>('extraArgs', []),
+    maxParallelTasks: Math.max(1, c.get<number>('maxParallelTasks', 3)),
   }
 }
 
@@ -134,8 +149,9 @@ export function runTask(
   task: Task,
   cfg: RunConfig,
   cwd: string,
-  out: vscode.OutputChannel,
+  out: LogSink,
   resume?: Resume,
+  parallel = false,
 ): RunHandle {
   let child: ChildProcess | undefined
   let cancelled = false
@@ -172,7 +188,7 @@ export function runTask(
       '--name',
       `plan-queue ${task.id}`,
       '--append-system-prompt',
-      UNATTENDED_NOTE,
+      parallel ? `${UNATTENDED_NOTE} ${PARALLEL_NOTE}` : UNATTENDED_NOTE,
     ]
     if (resume) args.push('--resume', resume.sessionId)
     if (cfg.allowedTools.length) args.push('--allowedTools', ...cfg.allowedTools)
@@ -323,7 +339,7 @@ export function runTask(
 }
 
 /** The optional post-task gate. Runs in the workspace, inherits your shell. */
-export function runGate(command: string, cwd: string, out: vscode.OutputChannel): Promise<boolean> {
+export function runGate(command: string, cwd: string, out: LogSink): Promise<boolean> {
   return new Promise((resolve) => {
     out.appendLine(`  gate: ${command}`)
     const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'] })

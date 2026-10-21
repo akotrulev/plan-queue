@@ -90,6 +90,12 @@
         "icon": "$(play-circle)"
       },
       {
+        "command": "planQueue.runTaskNow",
+        "title": "Run this task now, alongside the others",
+        "category": "Plan Queue",
+        "icon": "$(run-above)"
+      },
+      {
         "command": "planQueue.stop",
         "title": "Stop all running plans",
         "category": "Plan Queue",
@@ -186,6 +192,12 @@
         "icon": "$(trash)"
       },
       {
+        "command": "planQueue.connectClaude",
+        "title": "Connect Claude Code",
+        "category": "Plan Queue",
+        "icon": "$(plug)"
+      },
+      {
         "command": "planQueue.openSettings",
         "title": "Open settings",
         "category": "Plan Queue",
@@ -229,6 +241,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "planQueue.runTaskNow",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(pending|blocked|failed|waiting)\\.live$/",
+          "group": "1_run@1"
+        },
         {
           "command": "planQueue.runFromHere",
           "when": "view == planQueue.tasks && viewItem =~ /^task.[a-z]+$/",
@@ -394,6 +411,10 @@
         {
           "command": "planQueue.reply",
           "when": "false"
+        },
+        {
+          "command": "planQueue.runTaskNow",
+          "when": "false"
         }
       ]
     },
@@ -522,6 +543,24 @@
           "type": "boolean",
           "default": true,
           "description": "Merge a plan's branch into its base branch (with --no-ff) once every task is done or skipped, then remove the worktree. A conflict aborts the merge and keeps the branch. Off leaves the branch for you to merge or open a PR from."
+        },
+        "planQueue.maxParallelTasks": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "How many tasks of one plan may work at the same moment. Only tasks that declare `Depends on:` ever run side by side; a plan without those lines runs one task at a time whatever this is. They share the plan's one working tree, so give parallel tasks disjoint files. A task waiting for your reply does not count."
+        },
+        "planQueue.server.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Serve a local MCP and command-line endpoint (127.0.0.1, bearer-token protected) so Claude Code, or the `pq` command, can list, start, watch, answer and stop plans. Use the command 'Plan Queue: Connect Claude Code' to turn it on and register it."
+        },
+        "planQueue.server.port": {
+          "type": "number",
+          "default": 47321,
+          "scope": "machine",
+          "description": "Port for the control endpoint. With several VS Code windows open, only the first to start gets it."
         }
       }
     }
@@ -533,8 +572,8 @@
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
     "release": "node scripts/release.mjs",
-    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs",
-    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
+    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs",
+    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
     "publish": "npx --yes @vscode/vsce publish --no-dependencies",
     "publish:ovsx": "npx --yes ovsx publish plan-queue.vsix"
   },

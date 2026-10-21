@@ -12,22 +12,97 @@ import {
   slugFor,
 } from './git'
 import { readPlan, type Task } from './plan'
-import { readConfig, runGate, runTask, type Resume, type RunHandle } from './runner'
+import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
+import { readyTasks, unknownDeps } from './schedule'
 import type { PlanWorktree, StateStore } from './state'
 import type { PlanTree } from './tree'
+
+/** Output channel that also keeps the last lines, so a caller without VS Code can read the log. */
+class PlanLog implements LogSink {
+  private lines: string[] = []
+  private partial = ''
+
+  constructor(private readonly channel: vscode.OutputChannel) {}
+
+  append(text: string): void {
+    this.channel.append(text)
+    this.track(text)
+  }
+
+  appendLine(text: string): void {
+    this.channel.appendLine(text)
+    this.track(text + '\n')
+  }
+
+  show(preserveFocus?: boolean): void {
+    this.channel.show(preserveFocus)
+  }
+
+  dispose(): void {
+    this.channel.dispose()
+  }
+
+  tail(n: number): string {
+    const all = this.partial ? [...this.lines, this.partial] : this.lines
+    return all.slice(-n).join('\n')
+  }
+
+  private track(text: string): void {
+    const parts = (this.partial + text).split('\n')
+    this.partial = parts.pop() ?? ''
+    this.lines.push(...parts)
+    if (this.lines.length > 2000) this.lines.splice(0, this.lines.length - 1500)
+  }
+}
+
+/** Tags each line with its task, so tasks running side by side stay readable in one log. */
+function tagged(out: LogSink, tag: string): LogSink {
+  return {
+    append: (s) => out.append(s),
+    appendLine: (s) => out.appendLine(s ? `[${tag}] ${s}` : s),
+  }
+}
+
+/** A task of a running plan: its process, or the question it is waiting on. */
+interface Live {
+  task: Task
+  handle?: RunHandle
+  waiting?: { answer: (reply: string | undefined) => void }
+  /** Using a slot: false while it waits for a person, so that does not hold up the others. */
+  busy: boolean
+}
 
 /** One plan being worked through. Several can be in flight, one per plan. */
 interface Run {
   planPath: string
   title: string
-  out: vscode.OutputChannel
-  handle?: RunHandle
-  current?: Task
+  out: PlanLog
+  /** Where tasks run: the plan's worktree, or the workspace folder. */
+  cwd: string
+  wt?: PlanWorktree
+  live: Map<string, Live>
+  /** Started during this run, whatever came of them. */
+  attempted: Set<string>
+  /** Tasks started by hand with "Run now", which skip the dependency check and the cap. */
+  forced: string[]
   stopRequested: boolean
+  /** A task failed and stopOnFailure is on: nothing new starts, what runs finishes. */
+  halted: boolean
+  /** The loop is done launching; too late to add to it. */
+  closing: boolean
   /** Runs in the workspace itself rather than a worktree, so it has the folder to itself. */
   inPlace: boolean
-  /** Set while the plan is paused on a task that asked something. */
-  waiting?: { task: Task; answer: (reply: string | undefined) => void }
+  /** Tasks may share the working tree at the same moment. */
+  parallel: boolean
+  /** An answer for the task that was waiting when this run began. */
+  initialReply?: { taskId: string; text: string }
+  /** Passed, but not yet committed because another task was still working in the tree. */
+  uncommitted: { id: string; title: string }[]
+  gitLock: Promise<unknown>
+  gateLock: Promise<unknown>
+  ran: number
+  wake?: () => void
+  kicked: boolean
 }
 
 export interface ActiveRun {
@@ -42,8 +117,8 @@ type RunOptions = { fromId?: string; onlyId?: string; reply?: string }
 
 export class Queue implements vscode.Disposable {
   private readonly runs = new Map<string, Run>()
-  private readonly channels = new Map<string, vscode.OutputChannel>()
-  private lastChannel: vscode.OutputChannel | undefined
+  private readonly channels = new Map<string, PlanLog>()
+  private lastChannel: PlanLog | undefined
 
   constructor(
     private readonly state: StateStore,
@@ -59,20 +134,33 @@ export class Queue implements vscode.Disposable {
     return this.runs.has(planPath)
   }
 
-  get active(): ActiveRun[] {
-    return [...this.runs.values()].map((r) => ({
-      planPath: r.planPath,
-      title: r.title,
-      task: r.waiting?.task ?? r.current,
-      waiting: r.waiting !== undefined,
+  /** The tasks live in a plan right now, with whether each is waiting on a person. */
+  liveTasks(planPath: string): { task: Task; waiting: boolean }[] {
+    return [...(this.runs.get(planPath)?.live.values() ?? [])].map((l) => ({
+      task: l.task,
+      waiting: l.waiting !== undefined,
     }))
   }
 
+  /** One entry per task in flight; a plan still preparing has one without a task. */
+  get active(): ActiveRun[] {
+    return [...this.runs.values()].flatMap((r): ActiveRun[] =>
+      r.live.size
+        ? [...r.live.values()].map((l) => ({
+            planPath: r.planPath,
+            title: r.title,
+            task: l.task,
+            waiting: l.waiting !== undefined,
+          }))
+        : [{ planPath: r.planPath, title: r.title, task: undefined, waiting: false }],
+    )
+  }
+
   /** Each plan logs to a channel of its own, so parallel runs do not interleave. */
-  private channel(planPath: string, title: string): vscode.OutputChannel {
+  private channel(planPath: string, title: string): PlanLog {
     let out = this.channels.get(planPath)
     if (!out) {
-      out = vscode.window.createOutputChannel(`Plan Queue — ${title}`)
+      out = new PlanLog(vscode.window.createOutputChannel(`Plan Queue — ${title}`))
       this.channels.set(planPath, out)
     }
     return out
@@ -85,18 +173,27 @@ export class Queue implements vscode.Disposable {
     else void vscode.window.showInformationMessage('Plan Queue has not run anything yet.')
   }
 
+  /** The last lines of a plan's log. */
+  tail(planPath: string, lines: number): string {
+    return this.channels.get(planPath)?.tail(lines) ?? ''
+  }
+
   /**
-   * Send a message to the task running right now in that plan — into the turn
-   * in flight, or, when the task is waiting on a question, as the answer. False
-   * when nothing is running there, or the task is past the point of taking input.
+   * Send a message to a task running right now — into the turn in flight, or,
+   * when the task is waiting on a question, as the answer. Without a task id it
+   * goes to the plan's only live task. False when there is no such task, or it
+   * is past the point of taking input.
    */
-  send(planPath: string, text: string): boolean {
+  send(planPath: string, text: string, taskId?: string): boolean {
     const run = this.runs.get(planPath)
-    if (run?.waiting && text.trim()) {
-      run.waiting.answer(text.trim())
+    if (!run) return false
+    const live = taskId ? run.live.get(taskId) : run.live.size === 1 ? [...run.live.values()][0] : undefined
+    if (!live) return false
+    if (live.waiting && text.trim()) {
+      live.waiting.answer(text.trim())
       return true
     }
-    return run?.handle?.send(text) ?? false
+    return live.handle?.send(text) ?? false
   }
 
   /**
@@ -106,7 +203,7 @@ export class Queue implements vscode.Disposable {
    */
   reply(planPath: string, taskId: string, text: string): boolean {
     const run = this.runs.get(planPath)
-    if (run) return run.waiting?.task.id === taskId && this.send(planPath, text)
+    if (run) return run.live.get(taskId)?.waiting !== undefined && this.send(planPath, text, taskId)
     void this.run(planPath, { fromId: taskId, reply: text })
     return true
   }
@@ -116,15 +213,73 @@ export class Queue implements vscode.Disposable {
     for (const run of this.runs.values()) {
       if (planPath && run.planPath !== planPath) continue
       run.stopRequested = true
-      run.handle?.cancel()
-      // A plan paused on a question stops too; the task stays waiting.
-      run.waiting?.answer(undefined)
+      for (const live of run.live.values()) {
+        live.handle?.cancel()
+        // A task paused on a question stops too; it stays waiting.
+        live.waiting?.answer(undefined)
+      }
+      this.kick(run)
     }
   }
 
   dispose(): void {
     this.stop()
     for (const out of this.channels.values()) out.dispose()
+  }
+
+  private kick(run: Run): void {
+    if (run.wake) {
+      const w = run.wake
+      run.wake = undefined
+      w()
+    } else run.kicked = true
+  }
+
+  /**
+   * Start a plan without waiting for it to finish. Says why when it cannot —
+   * the answer to give a caller that is not looking at the VS Code window.
+   */
+  start(planPath: string, opts: RunOptions = {}): { ok: true } | { ok: false; reason: string } {
+    if (this.runs.has(planPath)) return { ok: false, reason: 'this plan is already running' }
+    if (!vscode.workspace.workspaceFolders?.length) return { ok: false, reason: 'no workspace folder is open' }
+    void this.run(planPath, opts)
+    return { ok: true }
+  }
+
+  /**
+   * Start one task of a plan that is running, now, whatever it depends on and
+   * however many tasks are already going. For a plan that is not running it is
+   * the same as running that task alone.
+   */
+  async runNow(planPath: string, taskId: string, confirm = true): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const run = this.runs.get(planPath)
+    if (!run) return this.start(planPath, { onlyId: taskId })
+    if (run.closing) return { ok: false, reason: 'the plan is finishing; run the task again in a moment' }
+    if (run.live.has(taskId)) return { ok: false, reason: `${taskId} is already running` }
+    const st = this.state.get(planPath, taskId).status
+    if (st === 'done' || st === 'skipped') return { ok: false, reason: `${taskId} is already ${st}` }
+
+    const plan = await readPlan(run.wt?.planPath ?? planPath, planPath)
+    const ordered = this.state.ordered(plan)
+    const ready = readyTasks({
+      ordered,
+      status: (id) => this.state.get(planPath, id).status,
+      attempted: run.attempted,
+      live: new Set(run.live.keys()),
+    })
+    if (confirm && !ready.some((t) => t.id === taskId)) {
+      const pick = await vscode.window.showWarningMessage(
+        `${taskId} is waiting on tasks that are not done yet. Run it now anyway?`,
+        'Run now',
+      )
+      if (pick !== 'Run now') return { ok: false, reason: 'cancelled' }
+    }
+    if (run.closing || run.live.has(taskId)) return { ok: false, reason: 'the plan has moved on; try again' }
+    run.attempted.delete(taskId)
+    run.parallel = true
+    run.forced.push(taskId)
+    this.kick(run)
+    return { ok: true }
   }
 
   /**
@@ -157,8 +312,22 @@ export class Queue implements vscode.Disposable {
       planPath,
       title,
       out: this.channel(planPath, title),
+      cwd: folder,
+      live: new Map(),
+      attempted: new Set(),
+      forced: [],
       stopRequested: false,
+      halted: false,
+      closing: false,
       inPlace: false,
+      parallel: false,
+      initialReply:
+        opts.reply !== undefined && opts.fromId ? { taskId: opts.fromId, text: opts.reply } : undefined,
+      uncommitted: [],
+      gitLock: Promise.resolve(),
+      gateLock: Promise.resolve(),
+      ran: 0,
+      kicked: false,
     }
     // Claim the slot before the first await below, so a double click cannot start it twice.
     this.runs.set(planPath, run)
@@ -166,13 +335,11 @@ export class Queue implements vscode.Disposable {
     await this.changed()
     run.out.show(true)
 
-    let ran = 0
-    let wt: PlanWorktree | undefined
     try {
       const prepared = await this.prepareWorktree(run, folder)
       if (prepared === 'cancelled') return
-      wt = prepared
-      if (!wt) {
+      run.wt = prepared
+      if (!prepared) {
         if ([...this.runs.values()].some((r) => r !== run && r.inPlace)) {
           void vscode.window.showWarningMessage(
             'Plan Queue is already running a plan in the workspace itself. Turn on planQueue.worktrees to run plans in parallel.',
@@ -181,85 +348,140 @@ export class Queue implements vscode.Disposable {
         }
         run.inPlace = true
       }
+      run.cwd = prepared?.cwd ?? folder
 
-      ran = await this.loop(run, wt, wt?.cwd ?? folder, opts)
-      if (wt && !run.stopRequested) await this.mergeIfDone(run, wt)
+      await this.loop(run, opts)
+      if (run.wt && !run.stopRequested) await this.mergeIfDone(run, run.wt)
     } catch (e) {
       void vscode.window.showErrorMessage(
         `Plan Queue — ${title} failed: ${e instanceof Error ? e.message : e}`,
       )
     } finally {
+      run.closing = true
       this.runs.delete(planPath)
       await this.changed()
-      if (ran && !run.stopRequested) {
-        void vscode.window.showInformationMessage(`Plan Queue — ${title}: finished ${ran} task(s).`)
+      if (run.ran && !run.stopRequested) {
+        void vscode.window.showInformationMessage(`Plan Queue — ${title}: finished ${run.ran} task(s).`)
       }
     }
   }
 
-  private async loop(
-    run: Run,
-    wt: PlanWorktree | undefined,
-    cwd: string,
-    opts: RunOptions,
-  ): Promise<number> {
+  /**
+   * Start whatever is ready, up to `maxParallelTasks` at once, and wait for
+   * something to change: a task ending, a reply arriving, a stop, a task started
+   * by hand. A task that declares `Depends on:` waits for exactly those tasks;
+   * one that does not waits for everything before it, so a plan with no such
+   * lines runs one task at a time, as it always did.
+   */
+  private async loop(run: Run, opts: RunOptions): Promise<void> {
     const { planPath, out } = run
-    let started = opts.fromId === undefined
-    let ran = 0
-    const done: string[] = []
-    let reply = opts.reply
 
     for (;;) {
-      if (run.stopRequested) break
-
-      // Re-read, every iteration. This is the point of the whole design.
-      const plan = await readPlan(wt?.planPath ?? planPath, planPath)
-      const ordered = this.state.ordered(plan)
-
-      let next: Task | undefined
-      for (const task of ordered) {
-        if (opts.onlyId) {
-          if (task.id !== opts.onlyId) continue
-          next = task
-          break
-        }
-        if (!started) {
-          if (task.id !== opts.fromId) continue
-          started = true
-        }
-        if (done.includes(task.id)) continue
-        const st = this.state.get(planPath, task.id)
-        if (st.status === 'done' || st.status === 'skipped') continue
-        next = task
-        break
+      // Tasks started by hand skip the dependency check and the cap.
+      while (run.forced.length && !run.stopRequested) {
+        const id = run.forced.shift()!
+        const task = this.state.ordered(await readPlan(run.wt?.planPath ?? planPath, planPath)).find((t) => t.id === id)
+        if (task && !run.live.has(id)) this.launch(run, task)
       }
-      if (!next) break
 
+      if (!run.stopRequested && !run.halted) {
+        // Re-read, every pass. This is the point of the whole design.
+        const plan = await readPlan(run.wt?.planPath ?? planPath, planPath)
+        const ordered = this.state.ordered(plan)
+        const cfg = readConfig()
+        run.parallel = run.parallel || (cfg.maxParallelTasks > 1 && ordered.some((t) => t.deps !== undefined))
+
+        for (const task of ordered) {
+          const missing = unknownDeps(task, ordered)
+          if (missing.length && !run.attempted.has(task.id)) {
+            out.appendLine(`  ${task.id}: depends on ${missing.join(', ')}, which the plan does not have`)
+          }
+        }
+
+        const ready = readyTasks({
+          ordered,
+          status: (id) => this.state.get(planPath, id).status,
+          attempted: run.attempted,
+          live: new Set(run.live.keys()),
+          fromId: opts.fromId,
+          onlyId: opts.onlyId,
+        })
+        let busy = [...run.live.values()].filter((l) => l.busy).length
+        for (const task of ready) {
+          if (busy >= cfg.maxParallelTasks) break
+          this.launch(run, task)
+          busy++
+        }
+      }
+
+      if (run.live.size === 0 && (!run.forced.length || run.stopRequested)) break
+      await new Promise<void>((resolve) => {
+        if (run.kicked) {
+          run.kicked = false
+          resolve()
+        } else run.wake = resolve
+      })
+    }
+    run.closing = true
+  }
+
+  /** Start a task without waiting for it; it tells the loop when it is done. */
+  private launch(run: Run, task: Task): void {
+    const live: Live = { task, busy: true }
+    run.live.set(task.id, live)
+    run.attempted.add(task.id)
+    void this.changed()
+    this.execute(run, live)
+      .catch((e) => {
+        run.halted = true
+        run.out.appendLine(`\n--- ${task.id} ERROR: ${e instanceof Error ? e.message : e}`)
+        void vscode.window.showErrorMessage(
+          `Plan Queue — ${task.id} failed: ${e instanceof Error ? e.message : e}`,
+        )
+      })
+      .finally(() => {
+        run.live.delete(task.id)
+        void this.changed()
+        this.kick(run)
+      })
+  }
+
+  /** One task, from its first turn to its verdict, including any questions it asks on the way. */
+  private async execute(run: Run, live: Live): Promise<void> {
+    const { planPath, wt } = run
+    const task = live.task
+    const out = run.parallel ? tagged(run.out, task.id) : run.out
+    let reply = run.initialReply?.taskId === task.id ? run.initialReply.text : undefined
+    if (reply !== undefined) run.initialReply = undefined
+
+    for (;;) {
       // A task that asked something picks up its own session once answered;
-      // the plan waits here meanwhile, and other plans carry on.
-      const before = this.state.get(planPath, next.id)
+      // it waits here meanwhile, and the rest of the plan, and other plans, carry on.
+      const before = this.state.get(planPath, task.id)
       let resume: Resume | undefined
       if (before.status === 'waiting' && before.sessionId) {
-        const answer = reply ?? (await this.awaitReply(run, next, before.question ?? ''))
+        live.busy = false
+        this.kick(run)
+        const answer = reply ?? (await this.awaitReply(run, live, before.question ?? ''))
         reply = undefined
-        if (answer === undefined) break
+        live.busy = true
+        if (answer === undefined) return
         out.appendLine(`  > ${answer.split('\n').join('\n  > ')}`)
         resume = { sessionId: before.sessionId, reply: answer }
       }
 
       const cfg = readConfig()
-      await this.state.set(planPath, next.id, {
+      await this.state.set(planPath, task.id, {
         status: 'running',
         reason: undefined,
         question: undefined,
-        ranHash: next.hash,
+        ranHash: task.hash,
       })
-      run.current = next
       await this.changed()
 
-      run.handle = runTask(next, cfg, cwd, out, resume)
-      const result = await run.handle.result
-      run.handle = undefined
+      live.handle = runTask(task, cfg, run.cwd, out, resume, run.parallel)
+      const result = await live.handle.result
+      live.handle = undefined
 
       // Cost and time add up across the turns of one task.
       const costUsd =
@@ -272,18 +494,17 @@ export class Queue implements vscode.Disposable {
         // An interrupted answer leaves the question open; a fresh task goes back to pending.
         await this.state.set(
           planPath,
-          next.id,
+          task.id,
           resume
             ? { status: 'waiting', reason: 'waiting for reply', question: before.question }
             : { status: 'pending' },
         )
-        run.current = undefined
         await this.changed()
-        break
+        return
       }
 
       if (result.waiting) {
-        await this.state.set(planPath, next.id, {
+        await this.state.set(planPath, task.id, {
           status: 'waiting',
           reason: 'waiting for reply',
           question: result.question,
@@ -291,7 +512,6 @@ export class Queue implements vscode.Disposable {
           costUsd,
           durationMs,
         })
-        run.current = undefined
         await this.changed()
         // Round again: the same task comes up, and waits for the answer.
         continue
@@ -301,23 +521,34 @@ export class Queue implements vscode.Disposable {
       let reason = result.reason
       const gate = vscode.workspace.getConfiguration('planQueue').get<string>('gateCommand', '')
       if (ok && gate.trim()) {
-        ok = await runGate(gate, cwd, out)
+        // One gate at a time: two against the same tree would each see the other's half-made edits.
+        const gated = run.gateLock.then(() => runGate(gate, run.cwd, out))
+        run.gateLock = gated.catch(() => undefined)
+        ok = await gated
         if (!ok) reason = 'gate failed'
       }
-      // Each task lands as a commit on the plan's branch, whatever the task did
-      // about committing itself, so the merge carries everything that passed.
+
+      // Each passing task lands on the plan's branch, whatever the task did about
+      // committing itself, so the merge carries everything that passed. Tasks that
+      // share the tree commit together, once the last of them has finished.
+      live.busy = false
       if (ok && wt) {
-        try {
-          if (await commitAll(wt.dir, `plan-queue: ${next.id} — ${next.title}`)) {
-            out.appendLine(`  committed on ${wt.branch}`)
+        run.uncommitted.push({ id: task.id, title: task.title })
+        const othersWorking = [...run.live.values()].some((l) => l !== live && l.busy)
+        if (othersWorking) {
+          out.appendLine('  commit deferred: another task is still working in the tree')
+        } else {
+          try {
+            const message = await this.commitPending(run, wt)
+            if (message) out.appendLine(`  committed on ${wt.branch}: ${message}`)
+          } catch (e) {
+            ok = false
+            reason = `commit failed: ${e instanceof Error ? e.message : e}`
           }
-        } catch (e) {
-          ok = false
-          reason = `commit failed: ${e instanceof Error ? e.message : e}`
         }
       }
 
-      await this.state.set(planPath, next.id, {
+      await this.state.set(planPath, task.id, {
         status: ok ? 'done' : 'blocked',
         reason: ok ? undefined : reason,
         finishedAt: Date.now(),
@@ -325,23 +556,39 @@ export class Queue implements vscode.Disposable {
         durationMs,
         sessionId: result.sessionId,
       })
-      run.current = undefined
       await this.changed()
-      done.push(next.id)
-      ran++
+      run.ran++
 
       if (!ok) {
         const stopOnFailure = vscode.workspace
           .getConfiguration('planQueue')
           .get<boolean>('stopOnFailure', true)
         void vscode.window
-          .showErrorMessage(`Plan Queue — ${next.id} did not finish: ${reason ?? 'unknown'}`, 'Show log')
-          .then((pick) => pick && out.show())
-        if (stopOnFailure) break
+          .showErrorMessage(`Plan Queue — ${task.id} did not finish: ${reason ?? 'unknown'}`, 'Show log')
+          .then((pick) => pick && run.out.show())
+        // Tasks already going are left to finish; nothing new starts.
+        if (stopOnFailure) run.halted = true
       }
-      if (opts.onlyId) break
+      return
     }
-    return ran
+  }
+
+  /** Commit what has passed since the last commit. One at a time: it is one index. */
+  private commitPending(run: Run, wt: PlanWorktree): Promise<string | undefined> {
+    const job = run.gitLock.then(async () => {
+      if (!run.uncommitted.length) return undefined
+      const batch = run.uncommitted.splice(0)
+      const message =
+        `plan-queue: ${batch.map((b) => b.id).join(', ')} — ${batch.map((b) => b.title).join('; ')}`
+      try {
+        return (await commitAll(wt.dir, message)) ? message : undefined
+      } catch (e) {
+        run.uncommitted.unshift(...batch)
+        throw e
+      }
+    })
+    run.gitLock = job.catch(() => undefined)
+    return job
   }
 
   /**
@@ -412,7 +659,7 @@ export class Queue implements vscode.Disposable {
   }
 
   /** A worktree holds only what is committed; the setup command rebuilds the rest. */
-  private async setUp(wt: PlanWorktree, out: vscode.OutputChannel): Promise<void> {
+  private async setUp(wt: PlanWorktree, out: LogSink): Promise<void> {
     const setup = vscode.workspace.getConfiguration('planQueue').get<string>('worktreeSetupCommand', '')
     if (!setup.trim()) return
     out.appendLine('  setting up the worktree')
@@ -421,13 +668,13 @@ export class Queue implements vscode.Disposable {
     }
   }
 
-  /** Pause the plan until the task's question is answered, or the plan is stopped. */
-  private async awaitReply(run: Run, task: Task, question: string): Promise<string | undefined> {
+  /** Hold a task until its question is answered, or the plan is stopped. */
+  private async awaitReply(run: Run, live: Live, question: string): Promise<string | undefined> {
+    const { task } = live
     const answer = new Promise<string | undefined>((resolve) => {
-      run.waiting = {
-        task,
+      live.waiting = {
         answer: (reply) => {
-          run.waiting = undefined
+          live.waiting = undefined
           resolve(reply)
         },
       }
@@ -510,20 +757,25 @@ export class Queue implements vscode.Disposable {
     if (!runs.length) {
       this.status.hide()
     } else {
-      const waiting = runs.filter((r) => r.waiting).length
-      const one = runs[0]
+      const lives = runs.flatMap((r) => [...r.live.values()])
+      const waiting = lives.filter((l) => l.waiting).length
+      const working = lives.filter((l) => !l.waiting)
       this.status.text =
         runs.length === 1
-          ? one.waiting
-            ? `$(comment-discussion) ${one.waiting.task.id} needs a reply`
-            : `$(sync~spin) ${one.current?.id ?? one.title}`
+          ? waiting && !working.length
+            ? `$(comment-discussion) ${lives.map((l) => l.task.id).join(', ')} ${waiting === 1 ? 'needs' : 'need'} a reply`
+            : `$(sync~spin) ${working.map((l) => l.task.id).join(', ') || runs[0].title}`
           : `$(sync~spin) ${runs.length} plans${waiting ? ` · ${waiting} waiting` : ''}`
       this.status.tooltip = runs
-        .map((r) =>
-          r.waiting
-            ? `${r.title} — ${r.waiting.task.id} is waiting for your reply`
-            : `${r.title} — ${r.current ? `${r.current.id} ${r.current.title}` : 'preparing'}`,
-        )
+        .map((r) => {
+          const tasks = [...r.live.values()]
+          return tasks.length
+            ? `${r.title}\n` +
+                tasks
+                  .map((l) => `  ${l.task.id} ${l.task.title}${l.waiting ? ' — waiting for your reply' : ''}`)
+                  .join('\n')
+            : `${r.title} — preparing`
+        })
         .join('\n')
       this.status.show()
     }

@@ -74,6 +74,9 @@ Any file matching `planQueue.planGlob` (default `docs/plans/**/*.md`) that has a
   still runs. Any other trailing parenthetical is treated as part of the title.
 - **The prompt** is the blockquote under the heading, or a fenced code block.
   A heading with neither is a placeholder, not a task.
+- **Dependencies**, optionally: a line `Depends on: T1, T2` inside the prompt
+  (`**Depends on:** T1`, a bullet, `none` all work). See
+  [Parallel tasks](#parallel-tasks-in-one-plan).
 
 Verified against seven real plans of different vintages.
 
@@ -97,6 +100,43 @@ A task counts as done only when its final message ends with `PLAN_QUEUE: DONE`
 out of turns or budget, or a non-zero exit all halt the queue with the reason on
 the task. Turn the sentinel off with `planQueue.requireSentinel` if you would
 rather trust the exit code alone.
+
+### Parallel tasks in one plan
+
+A task with no `Depends on:` line waits for every task before it, so a plan
+that never uses the line runs exactly as before: one task at a time, in order.
+A task that declares `Depends on:` waits only for those tasks, and starts the
+moment they are done — so tasks that share a dependency run together, up to
+`planQueue.maxParallelTasks` (default 3) working at once:
+
+```markdown
+### T1 — the schema        (no line: first, alone)
+### T2 — the API           > Depends on: T1
+### T3 — the CLI           > Depends on: T1
+### T4 — docs and close-out > Depends on: T2, T3
+```
+
+`Depends on: none` makes a task free to start immediately, beside the first.
+Dependencies are re-read with the rest of the plan before every scheduling
+decision. A dependency the plan does not have is noted in the log and ignored;
+a line with no task ids in it is ignored too, so prose such as "Depends on: the
+schema" cannot make a task start early.
+
+- **They share the plan's working tree.** Give parallel tasks disjoint files.
+  Each is told so, and told not to stash, reset, checkout or commit; the queue
+  commits for them. Because a commit would otherwise sweep up a neighbour's
+  half-written files, tasks that pass while another is still working wait, and
+  are committed together when the last of them finishes (their ids all appear in
+  the commit message).
+- **Gates run one at a time**, so two never test the same half-edited tree.
+- **A failure stops new starts** (with `stopOnFailure`); tasks already going are
+  left to finish. A task that named the failed one as a dependency never starts.
+- **A task waiting for your reply does not hold a slot**, though it still blocks
+  everything that depends on it.
+- **Run this task now** (right-click a task of a running plan) starts it
+  alongside the others, ignoring its dependencies and the cap, after asking if
+  it is not yet ready. The tasks already running keep going.
+- Output from parallel tasks is tagged `[T2]` in the plan's log.
 
 ### When a task asks you something
 
@@ -130,8 +170,9 @@ fails the task even when the model claimed success.
 
 With `planQueue.worktrees` on (the default) and the workspace in a git
 repository, **each plan runs on a branch of its own in a worktree of its own**,
-so you can start several plans at once. Tasks within a plan still run one after
-another, since each builds on the one before.
+so you can start several plans at once. Tasks within a plan run one after
+another unless they declare `Depends on:` (see above), since each normally
+builds on the one before.
 
 - The first run of a plan cuts `plan-queue/<plan>-<hash>` from the branch the
   workspace is on and checks it out under `planQueue.worktreeRoot` (default: a
@@ -157,6 +198,56 @@ another, since each builds on the one before.
 
 With worktrees off, or outside a git repository, a plan runs in the workspace
 itself and only one such plan runs at a time.
+
+## Driving it from Claude Code
+
+Plan Queue can serve a small local endpoint so that something other than the
+sidebar — Claude Code over MCP, or a shell — can list, start, watch, answer and
+stop plans. It is **off by default**.
+
+Run **Plan Queue: Connect Claude Code** from the command palette. It turns the
+server on (`planQueue.server.enabled`), installs the `pq` command into
+`~/.local/bin`, and registers the server with `claude mcp add` — for all your
+projects or just this one, as you choose. New Claude Code sessions then have
+these tools:
+
+| Tool | Does |
+|---|---|
+| `list_plans` | plans, progress, which tasks are waiting or blocked |
+| `plan_status` | every task: status, dependencies, cost, the question a waiting task asked |
+| `run_plan` | start a plan (optionally `from_task`); returns at once |
+| `run_task` | run one task; `now` starts it beside a running plan |
+| `reply` | answer a waiting task |
+| `message` | type into a task that is working |
+| `get_log` | the last lines of the plan's log |
+| `stop` | stop one plan or all |
+
+The same calls from a shell, which is also what an LLM with only a Bash tool
+can use:
+
+```
+pq list
+pq run storefront                # a path, file name or title; a fragment is enough
+pq status storefront
+pq reply storefront T3 use soft-delete
+pq task storefront T5 --now
+pq log storefront 120
+```
+
+- It listens on `127.0.0.1` only, refuses requests that carry a browser
+  `Origin`, and requires a bearer token. The token is kept in VS Code's secret
+  storage and in `~/.plan-queue/server.json` (mode 0600), which `pq` reads.
+- Anyone holding the token can start model calls and edits in this workspace.
+  Treat `claude mcp add --scope user` accordingly: every Claude Code session you
+  open will be able to do it.
+- It serves the workspace of the window that started it. With several VS Code
+  windows open, only the first gets the port (`planQueue.server.port`, default
+  47321).
+- Tasks the queue launches inherit your Claude Code MCP config, so they can see
+  these tools too. A plan that is already running refuses to be started again,
+  but a task should not start its own plan.
+- Starting a plan whose file is not committed still raises the same
+  confirmation box in VS Code, and waits for you.
 
 ## Permissions
 
@@ -191,6 +282,9 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>.plan-queue/` beside the repo |
 | `planQueue.worktreeSetupCommand` | — | Run once in a new worktree, e.g. `npm ci` |
 | `planQueue.mergeWhenDone` | `true` | Merge the branch back when the plan is done |
+| `planQueue.maxParallelTasks` | `3` | Tasks of one plan working at once; only `Depends on:` tasks ever overlap |
+| `planQueue.server.enabled` | `false` | Serve the local MCP / `pq` endpoint |
+| `planQueue.server.port` | `47321` | Its port |
 
 ## Headless equivalent
 
