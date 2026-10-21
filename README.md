@@ -88,18 +88,34 @@ Each task is one `claude -p` invocation, so each gets a genuinely fresh context.
 - **Run from here** starts at the task you picked; **Run this task only** runs
   exactly one.
 - **Stop** kills the running task and leaves it pending — in the view title it
-  stops every running plan; on a plan, just that one.
+  stops every running plan; on a plan, just that one. Each task (and each gate)
+  runs in a process group of its own, so Stop also takes down what it started:
+  a dev server, a test watcher. The same happens when a task ends normally.
 - **Message the running task** (the speech-bubble button in the view title, `cmd+alt+m` /
   `ctrl+alt+m`, or the command palette) types into the task already in flight —
   the same as interjecting in an interactive session. The task's stdin stays
   open for the whole run, so the message lands in the turn that is running, not
   after it. What you send is echoed into the log with a `>` prefix.
 
-A task counts as done only when its final message ends with `PLAN_QUEUE: DONE`
-— an appended system prompt asks for it. `PLAN_QUEUE: BLOCKED <reason>`, running
-out of turns or budget, or a non-zero exit all halt the queue with the reason on
-the task. Turn the sentinel off with `planQueue.requireSentinel` if you would
-rather trust the exit code alone.
+An appended system prompt asks every task to end its final message with one
+line of its own:
+
+| Line | Means |
+|---|---|
+| `PLAN_QUEUE: DONE` | landed, and its gate passed — the task is done |
+| `PLAN_QUEUE: BLOCKED <reason>` | it could not finish — the queue halts with the reason on the task |
+| `PLAN_QUEUE: QUESTION` | the message above it is a question for you — [the task waits](#when-a-task-asks-you-something) |
+
+A sentinel only counts on a line of its own (bold or backticks are fine), and
+the last one wins, so a message that merely mentions `PLAN_QUEUE: DONE` is not
+taken for it. Running out of turns or budget, or a non-zero exit, also halt the
+queue.
+
+A turn that ends with **no** sentinel — usually a task that finished and forgot
+the line — is not left hanging: the queue resumes the session once and asks it
+to say which it is. Only if that reply has no sentinel either does the task wait
+for you. Turn sentinels off with `planQueue.requireSentinel` if you would rather
+trust the exit code alone.
 
 ### Parallel tasks in one plan
 
@@ -140,10 +156,10 @@ schema" cannot make a task start early.
 
 ### When a task asks you something
 
-A task that ends its turn with **neither** sentinel has stopped to ask a person
-something (the appended system prompt tells it to, and to do so only when it
-genuinely cannot go on). Instead of failing, the task goes to **waiting for
-reply**:
+A task that ends its turn with `PLAN_QUEUE: QUESTION` has stopped to ask a
+person something (the appended system prompt tells it to do so only when it
+genuinely cannot go on). So does one that ended with no sentinel and still gave
+none when asked. Instead of failing, the task goes to **waiting for reply**:
 
 - It turns yellow in the tree, its question is in the tooltip and at the end of
   the log, and a notification shows the gist with a **Reply** button.
@@ -162,9 +178,11 @@ reply**:
 With `planQueue.requireSentinel` off, a turn that ends cleanly is done, so a
 task cannot wait for a reply.
 
-`planQueue.gateCommand` runs after every task in the task's folder (the plan's worktree when it has one) — e.g.
-`ssh shanks "cd ~/projects/agentic-shop && pnpm test"` — and a non-zero exit
-fails the task even when the model claimed success.
+`planQueue.gateCommand` (e.g. `pnpm test`) runs after every task in the task's
+folder — the plan's worktree when it has one — and a non-zero exit fails the
+task even when the model claimed success. A gate that runs longer than
+`planQueue.gateTimeoutMinutes` (default 30) is killed and fails the task;
+stopping the plan kills it too, and the task goes back to pending.
 
 ## Parallel plans, in worktrees
 
@@ -181,6 +199,14 @@ builds on the one before.
 - `planQueue.worktreeSetupCommand` (e.g. `npm ci`) runs once in a new worktree,
   since it starts with only what is committed.
 - Every task that passes — sentinel and gate — is committed on the plan's branch.
+- A task that does not pass — blocked, gate failed, or stopped — may have left
+  half its work in the tree. Once no other task of the plan is in the tree, it
+  is **stashed** (`git stash`, untracked files included), so the next task and
+  the next commit start from what passed. The log names the stash;
+  `git stash apply <ref>` brings it back. Turn this off with
+  `planQueue.stashFailedWork`. When a task fails while another is still working
+  beside it, the two cannot be told apart: the next commit carries both, and
+  its message says so.
 - When every task is done or skipped, the branch is merged into the branch it
   was cut from with `--no-ff`, and the worktree and branch are removed. The
   merge happens in the main checkout, which has to still be on that branch;
@@ -279,8 +305,10 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.allowedTools` | a working set | Commands allowed without a prompt |
 | `planQueue.budgetUsd` | `0` | Per-task `--max-budget-usd`; 0 is no ceiling |
 | `planQueue.gateCommand` | — | Shell check after each task |
+| `planQueue.gateTimeoutMinutes` | `30` | Kill a gate or setup command after this long; 0 is no limit |
+| `planQueue.stashFailedWork` | `true` | Stash what a task that did not pass left in its worktree |
 | `planQueue.stopOnFailure` | `true` | Halt the queue on a failed task |
-| `planQueue.requireSentinel` | `true` | Require `PLAN_QUEUE: DONE` |
+| `planQueue.requireSentinel` | `true` | Require `PLAN_QUEUE: DONE`; a missing one is asked about once |
 | `planQueue.useAgentFromPlan` | `true` | Honour the heading's agent |
 | `planQueue.extraArgs` | `[]` | Extra `claude` arguments |
 | `planQueue.worktrees` | `true` | One worktree and branch per plan, so plans run in parallel |
@@ -290,8 +318,3 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.maxParallelTasks` | `3` | Tasks of one plan working at once; only `Depends on:` tasks ever overlap |
 | `planQueue.server.enabled` | `false` | Serve the local MCP / `pq` endpoint |
 | `planQueue.server.port` | `47321` | Its port |
-
-## Headless equivalent
-
-`~/bin/plan-queue` is the same runner as a shell script, for a machine with no
-editor open. The extension does not depend on it.

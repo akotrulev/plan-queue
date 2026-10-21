@@ -26,6 +26,8 @@ export interface Plan {
   path: string
   title: string
   tasks: Task[]
+  /** Ids used by more than one heading. Only the first is a task; status and order key on the id. */
+  duplicates: string[]
 }
 
 const PROMPTS_HEADING = /^##\s+Prompts\b/i
@@ -54,10 +56,11 @@ function parseHeading(text: string): { id: string; title: string; agent: string 
   let rest = text.trim().replace(/^(prompt|task)\s+/i, '')
 
   // A trailing "(`agent`, `stack`)" names the agent. A trailing parenthetical
-  // that is anything else — "(§9)", "(see below)" — belongs to the title.
+  // that is anything else — "(§9)", "(see below)", "(wip)" — belongs to the title:
+  // an agent is written in backticks, or paired with its stack.
   let agent = ''
   const parens = rest.match(/\(([^)]*)\)\s*$/)
-  if (parens) {
+  if (parens && /[`,]/.test(parens[1])) {
     const candidate = parens[1].split(',')[0].replace(/`/g, '').trim()
     if (/^[a-z][a-z0-9]*(?:[:_-][a-z0-9]+)*$/i.test(candidate)) {
       agent = candidate
@@ -107,6 +110,7 @@ function extractPrompt(lines: string[]): string | undefined {
 export function parsePlanText(text: string, path: string): Plan {
   const lines = text.split(/\r?\n/)
   const tasks: Task[] = []
+  const duplicates: string[] = []
 
   let title = path.split('/').pop() ?? path
   const h1 = lines.find((l) => /^#\s/.test(l))
@@ -119,11 +123,14 @@ export function parsePlanText(text: string, path: string): Plan {
   let buffer: string[] = []
 
   const flush = () => {
-    if (!current) return
+    const head = current
+    if (!head) return
     const prompt = extractPrompt(buffer)
-    if (prompt && prompt.trim()) {
+    if (prompt && prompt.trim() && tasks.some((t) => t.id === head.id)) {
+      if (!duplicates.includes(head.id)) duplicates.push(head.id)
+    } else if (prompt && prompt.trim()) {
       tasks.push({
-        ...current,
+        ...head,
         prompt,
         deps: parseDeps(prompt),
         hash: crypto.createHash('sha1').update(prompt).digest('hex').slice(0, 12),
@@ -168,7 +175,7 @@ export function parsePlanText(text: string, path: string): Plan {
   }
   flush()
 
-  return { path, title, tasks }
+  return { path, title, tasks, duplicates }
 }
 
 /**

@@ -107,6 +107,11 @@ export class StateStore {
     return this.store[path]?.worktree
   }
 
+  /** Every plan worktree this workspace has, for watching their plan copies. */
+  worktrees(): PlanWorktree[] {
+    return Object.values(this.store).flatMap((p) => (p.worktree ? [p.worktree] : []))
+  }
+
   async setWorktree(path: string, wt: PlanWorktree | undefined): Promise<void> {
     this.planState(path).worktree = wt
     await this.save()

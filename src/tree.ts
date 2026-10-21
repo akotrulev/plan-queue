@@ -97,7 +97,8 @@ export class PlanTree
     )
     const wt = this.state.worktree(plan.path)
     const live = this.isRunning(plan.path)
-    item.description = `${done}/${tasks.length}${wt ? ` · ${wt.branch}` : ''}`
+    const dup = plan.duplicates.length ? ` · ⚠ duplicate ${plan.duplicates.join(', ')}` : ''
+    item.description = `${done}/${tasks.length}${wt ? ` · ${wt.branch}` : ''}${dup}`
     // plan[.live][.wt] — the menus key on both.
     item.contextValue = `plan${live ? '.live' : ''}${wt ? '.wt' : ''}`
     item.iconPath = new vscode.ThemeIcon(
@@ -105,12 +106,16 @@ export class PlanTree
       live ? new vscode.ThemeColor('charts.blue') : undefined,
     )
     item.resourceUri = vscode.Uri.file(plan.path)
-    item.tooltip = wt
-      ? `${plan.path}
+    item.tooltip =
+      (wt
+        ? `${plan.path}
 
 Worktree: ${wt.dir}
 Branch: ${wt.branch}, merges into ${wt.base}`
-      : plan.path
+        : plan.path) +
+      (plan.duplicates.length
+        ? `\n\n⚠ ${plan.duplicates.join(', ')} heads more than one task. Only the first runs; rename the others.`
+        : '')
     return item
   }
 

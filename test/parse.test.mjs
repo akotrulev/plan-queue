@@ -111,3 +111,14 @@ test('a ## Prompts heading shown inside a fence is not the section', () => {
   const p = parsePlanText('# Notes\n\n```md\n## Prompts\n\n### T1 — a\n\n> x\n```\n', '/x/p.md')
   assert.deepEqual(p.tasks, [])
 })
+
+test('a lone word in parentheses is part of the title, not an agent', () => {
+  const p = parsePlanText('## Prompts\n\n### T1 — the cart (wip)\n\n> body\n\n### T2 — x (`fe-react`)\n\n> body\n', '/x/p.md')
+  assert.deepEqual(p.tasks.map((t) => [t.title, t.agent]), [['the cart (wip)', ''], ['x', 'fe-react']])
+})
+
+test('a repeated id keeps the first task and is reported', () => {
+  const p = parsePlanText('## Prompts\n\n### T1 — a\n\n> x\n\n### T1 — b\n\n> y\n\n### T2 — c\n\n> z\n', '/x/p.md')
+  assert.deepEqual(p.tasks.map((t) => [t.id, t.title]), [['T1', 'a'], ['T2', 'c']])
+  assert.deepEqual(p.duplicates, ['T1'])
+})

@@ -16,14 +16,41 @@ test('the blocked sentinel carries its reason', () => {
   assert.deepEqual(verdict({ ...base, finalText: 'PLAN_QUEUE: BLOCKED' }), { kind: 'blocked', reason: 'blocked' })
 })
 
-test('neither sentinel means the agent is asking, and the question is its message', () => {
-  assert.deepEqual(verdict({ ...base, finalText: '  Should the table be soft-deleted or dropped?\n' }), {
-    kind: 'waiting',
-    question: 'Should the table be soft-deleted or dropped?',
+test('the question sentinel hands the message to a person, without the sentinel line', () => {
+  assert.deepEqual(
+    verdict({ ...base, finalText: '  Should the table be soft-deleted or dropped?\nPLAN_QUEUE: QUESTION\n' }),
+    { kind: 'waiting', question: 'Should the table be soft-deleted or dropped?' },
+  )
+})
+
+test('no sentinel at all is silent, for the queue to ask about once', () => {
+  assert.deepEqual(verdict({ ...base, finalText: '  All done, tests green.\n' }), {
+    kind: 'silent',
+    text: 'All done, tests green.',
   })
 })
 
+test('a sentinel only counts on a line of its own', () => {
+  const v = verdict({ ...base, finalText: "I will print PLAN_QUEUE: DONE once the tests pass.\nWhich runner?" })
+  assert.equal(v.kind, 'silent')
+  const b = verdict({ ...base, finalText: 'Not PLAN_QUEUE: BLOCKED, just a note.\nPLAN_QUEUE: DONE' })
+  assert.deepEqual(b, { kind: 'done' })
+})
+
+test('a dressed-up sentinel still counts, and the last one wins', () => {
+  assert.deepEqual(verdict({ ...base, finalText: 'ok\n**PLAN_QUEUE: DONE**' }), { kind: 'done' })
+  assert.deepEqual(verdict({ ...base, finalText: 'ok\n`PLAN_QUEUE: DONE`.' }), { kind: 'done' })
+  assert.deepEqual(verdict({ ...base, finalText: 'PLAN_QUEUE: BLOCKED x\nfixed it after all\nPLAN_QUEUE: DONE' }), {
+    kind: 'done',
+  })
+  assert.deepEqual(verdict({ ...base, finalText: 'PLAN_QUEUE: BLOCKED: gate red' }), { kind: 'blocked', reason: 'gate red' })
+})
+
 test('no session to resume, or nothing said, is a failure rather than a question', () => {
+  assert.deepEqual(verdict({ ...base, sessionId: undefined, finalText: 'Which one?\nPLAN_QUEUE: QUESTION' }), {
+    kind: 'failed',
+    reason: 'no completion sentinel',
+  })
   assert.deepEqual(verdict({ ...base, sessionId: undefined, finalText: 'Which one?' }), {
     kind: 'failed',
     reason: 'no completion sentinel',
