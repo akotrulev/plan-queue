@@ -184,6 +184,43 @@ task even when the model claimed success. A gate that runs longer than
 `planQueue.gateTimeoutMinutes` (default 30) is killed and fails the task;
 stopping the plan kills it too, and the task goes back to pending.
 
+A failed gate is not the end of the task. Its output (the last 12 KB) is handed
+back to the **same session** — which still has everything it learned doing the
+work — with a request to fix the cause and run the gate itself. The gate then
+runs again. `planQueue.gateRetries` (default 1) sets how many times; 0 fails the
+task at once.
+
+### Logs
+
+Each plan has an output channel, **Plan Queue — <plan title>**. It shows what
+the model says and, for each tool call, what it did — `$ pnpm test`,
+`Edit src/cart.ts`, `Grep TODO in src` — plus `✗` and the first line of any tool
+call that failed. Thinking is left out unless `planQueue.logThinking` is on.
+
+Every run of a task also writes a **transcript** of its own: every turn, the
+gate, the commit or the stash. *Show the log* on a task opens its latest one,
+even after the window that ran it has closed. The last ten per task are kept, in
+VS Code's storage for this workspace.
+
+### When a command is denied
+
+Anything not on `planQueue.allowedTools` is denied rather than waiting for a
+prompt. The queue reads which calls were denied, logs them, and names the
+allowlist entry that would have let each one through — `Bash(terraform:*)`
+for a command, the tool's name otherwise. When the task did not finish, the
+entries are on the task (*denied …*) and the error notification has an
+**Allow** button; right-click the task for *Allow the tools this task was
+denied*. They are added wherever `allowedTools` is set now; run the task again
+to use them.
+
+### Taking a task over by hand
+
+Right-click a task for *Resume the task's session in a terminal*: it opens
+`claude --resume <session>` in the task's folder (the plan's worktree when it
+has one), with the whole context of the run. Finish it there, then mark the
+task done (or reset it) so the queue moves on. Sessions are named
+`plan-queue <plan> <task>`, so they are easy to tell apart in `claude --resume`.
+
 ## Parallel plans, in worktrees
 
 With `planQueue.worktrees` on (the default) and the workspace in a git
@@ -245,7 +282,7 @@ these tools:
 | `run_task` | run one task; `now` starts it beside a running plan |
 | `reply` | answer a waiting task |
 | `message` | type into a task that is working |
-| `get_log` | the last lines of the plan's log |
+| `get_log` | the last lines of the plan's log, or of one task's transcript |
 | `stop` | stop one plan or all |
 
 The same calls from a shell, which is also what an LLM with only a Bash tool
@@ -258,6 +295,7 @@ pq status storefront
 pq reply storefront T3 use soft-delete
 pq task storefront T5 --now
 pq log storefront 120
+pq log storefront T3             # that task's latest transcript
 ```
 
 - It listens on `127.0.0.1` only, refuses requests that carry a browser
@@ -306,11 +344,13 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.budgetUsd` | `0` | Per-task `--max-budget-usd`; 0 is no ceiling |
 | `planQueue.gateCommand` | — | Shell check after each task |
 | `planQueue.gateTimeoutMinutes` | `30` | Kill a gate or setup command after this long; 0 is no limit |
+| `planQueue.gateRetries` | `1` | Times a failed gate's output is handed back to the task to fix |
 | `planQueue.stashFailedWork` | `true` | Stash what a task that did not pass left in its worktree |
 | `planQueue.stopOnFailure` | `true` | Halt the queue on a failed task |
 | `planQueue.requireSentinel` | `true` | Require `PLAN_QUEUE: DONE`; a missing one is asked about once |
 | `planQueue.useAgentFromPlan` | `true` | Honour the heading's agent |
 | `planQueue.extraArgs` | `[]` | Extra `claude` arguments |
+| `planQueue.logThinking` | `false` | Include the model's thinking in the log |
 | `planQueue.worktrees` | `true` | One worktree and branch per plan, so plans run in parallel |
 | `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>.plan-queue/` beside the repo |
 | `planQueue.worktreeSetupCommand` | — | Run once in a new worktree, e.g. `npm ci` |

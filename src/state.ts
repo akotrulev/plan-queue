@@ -16,6 +16,10 @@ export interface TaskState {
   costUsd?: number
   durationMs?: number
   sessionId?: string
+  /** This task's latest transcript. */
+  logFile?: string
+  /** Allowlist entries that would have let through calls the task was denied. */
+  denied?: string[]
 }
 
 export interface PlanState {

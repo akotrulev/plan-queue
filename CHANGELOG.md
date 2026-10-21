@@ -20,6 +20,19 @@
 - A fenced code block in a prompt that contains `##` or `###` lines no longer
   cuts the prompt short or drops the tasks after it.
 - Plan Queue is disabled in untrusted and virtual workspaces.
+- **A failed gate goes back to the task.** Its output is handed to the same
+  session to fix, then the gate runs again (`planQueue.gateRetries`, default 1).
+- **Denied commands are named.** The log, the task and the error notification
+  show the allowlist entry each denied call needed (`Bash(terraform:*)`), with
+  an **Allow** button and a task action that adds them.
+- **Resume a task's session in a terminal** — `claude --resume` in the task's
+  folder — to finish it by hand. Sessions are named `plan-queue <plan> <task>`.
+- **Better logs.** Tool calls show what they ran or touched (`$ pnpm test`,
+  `Edit src/a.ts`), failed tool calls are marked `✗`, thinking is left out
+  (`planQueue.logThinking`), and long lines break at a space.
+- **Task transcripts.** Each run of a task is written to a file of its own;
+  *Show the log* on a task opens it, and `get_log` / `pq log <plan> <task>` read
+  it, after the window has closed.
 - **A forgotten sentinel no longer stalls a plan.** A turn that ends with no
   `PLAN_QUEUE:` line is asked once, in the same session, whether it is done,
   blocked or asking; only a second silence waits for a person. Tasks now mark a

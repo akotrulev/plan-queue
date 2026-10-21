@@ -1,3 +1,4 @@
+import * as fs from 'fs'
 import * as path from 'path'
 import * as vscode from 'vscode'
 import {
@@ -15,6 +16,7 @@ import {
 import { readPlan, type Task } from './plan'
 import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
 import { readyTasks, unknownDeps } from './schedule'
+import { gateFixPrompt } from './describe'
 import { NUDGE } from './verdict'
 import type { PlanWorktree, StateStore } from './state'
 import type { PlanTree } from './tree'
@@ -64,6 +66,23 @@ function tagged(out: LogSink, tag: string): LogSink {
     appendLine: (s) => out.appendLine(s ? `[${tag}] ${s}` : s),
   }
 }
+
+/** Writes to two logs at once: the plan's channel and the task's transcript. */
+function tee(a: LogSink, b: LogSink): LogSink {
+  return {
+    append: (s) => {
+      a.append(s)
+      b.append(s)
+    },
+    appendLine: (s) => {
+      a.appendLine(s)
+      b.appendLine(s)
+    },
+  }
+}
+
+/** Transcripts kept per task; older ones are deleted. */
+const KEEP_TRANSCRIPTS = 10
 
 /** A task of a running plan: its process, or the question it is waiting on. */
 interface Live {
@@ -130,6 +149,8 @@ export class Queue implements vscode.Disposable {
     private readonly state: StateStore,
     private readonly tree: PlanTree,
     private readonly status: vscode.StatusBarItem,
+    /** Where task transcripts go; none are kept without it. */
+    private readonly logDir?: string,
   ) {}
 
   get running(): boolean {
@@ -179,9 +200,48 @@ export class Queue implements vscode.Disposable {
     else void vscode.window.showInformationMessage('Plan Queue has not run anything yet.')
   }
 
-  /** The last lines of a plan's log. */
-  tail(planPath: string, lines: number): string {
+  /** The last lines of a plan's log, or of one task's latest transcript. */
+  tail(planPath: string, lines: number, taskId?: string): string {
+    if (taskId) {
+      const file = this.state.get(planPath, taskId).logFile
+      try {
+        return file ? fs.readFileSync(file, 'utf8').split('\n').slice(-lines).join('\n') : ''
+      } catch {
+        return ''
+      }
+    }
     return this.channels.get(planPath)?.tail(lines) ?? ''
+  }
+
+  /**
+   * A file of its own for one run of a task — every turn, the gate, the commit —
+   * so it can be read after the window that ran it has closed.
+   */
+  private transcript(run: Run, task: Task): { sink: LogSink; file?: string; close(): void } {
+    const none = { sink: { append() {}, appendLine() {} }, close() {} }
+    if (!this.logDir) return none
+    try {
+      const dir = path.join(this.logDir, slugFor(vscode.workspace.asRelativePath(run.planPath)))
+      fs.mkdirSync(dir, { recursive: true })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const file = path.join(dir, `${task.id}-${stamp}.log`)
+      const old = fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith(`${task.id}-`) && f.endsWith('.log'))
+        .sort()
+      for (const f of old.slice(0, Math.max(0, old.length - KEEP_TRANSCRIPTS + 1))) {
+        fs.rmSync(path.join(dir, f), { force: true })
+      }
+      const stream = fs.createWriteStream(file, { flags: 'a' })
+      stream.on('error', () => undefined)
+      return {
+        sink: { append: (s) => void stream.write(s), appendLine: (s) => void stream.write(s + '\n') },
+        file,
+        close: () => stream.end(),
+      }
+    } catch {
+      return none
+    }
   }
 
   /**
@@ -455,24 +515,38 @@ export class Queue implements vscode.Disposable {
       })
   }
 
-  /** One task, from its first turn to its verdict, including any questions it asks on the way. */
+  /** One task, logged to a transcript of its own as well as the plan's channel. */
   private async execute(run: Run, live: Live): Promise<void> {
+    const { planPath } = run
+    const task = live.task
+    const log = this.transcript(run, task)
+    if (log.file) await this.state.set(planPath, task.id, { logFile: log.file })
+    try {
+      await this.turns(run, live, tee(run.parallel ? tagged(run.out, task.id) : run.out, log.sink))
+    } finally {
+      log.close()
+    }
+  }
+
+  /** One task, from its first turn to its verdict, including any questions it asks on the way. */
+  private async turns(run: Run, live: Live, out: LogSink): Promise<void> {
     const { planPath, wt } = run
     const task = live.task
-    const out = run.parallel ? tagged(run.out, task.id) : run.out
     let reply = run.initialReply?.taskId === task.id ? run.initialReply.text : undefined
     if (reply !== undefined) run.initialReply = undefined
-    // A turn with no sentinel gets one question back from the queue before a person is asked.
-    let nudge: string | undefined
+    // The queue's own follow-ups in the same session: once about a missing
+    // sentinel, and up to gateRetries times with a failed gate's output.
+    let followUp: { text: string; label: string } | undefined
     let nudged = false
+    let gateFixes = 0
+    let denied: string[] = []
 
     for (;;) {
       const before = this.state.get(planPath, task.id)
-      let resume: (Resume & { kind: 'reply' | 'nudge' }) | undefined
-      if (nudge !== undefined && before.sessionId) {
-        out.appendLine('  no sentinel; asking the task whether it is done, blocked or asking something')
-        resume = { sessionId: before.sessionId, reply: nudge, kind: 'nudge' }
-        nudge = undefined
+      let resume: (Resume & { kind: 'reply' | 'queue' }) | undefined
+      if (followUp && before.sessionId) {
+        resume = { sessionId: before.sessionId, reply: followUp.text, label: followUp.label, kind: 'queue' }
+        followUp = undefined
       } else if (before.status === 'waiting' && before.sessionId) {
         // A task that asked something picks up its own session once answered;
         // it waits here meanwhile, and the rest of the plan, and other plans, carry on.
@@ -483,7 +557,7 @@ export class Queue implements vscode.Disposable {
         live.busy = true
         if (answer === undefined) return
         out.appendLine(`  > ${answer.split('\n').join('\n  > ')}`)
-        resume = { sessionId: before.sessionId, reply: answer, kind: 'reply' }
+        resume = { sessionId: before.sessionId, reply: answer, label: 'resumed with your reply', kind: 'reply' }
       }
 
       const cfg = readConfig()
@@ -495,9 +569,14 @@ export class Queue implements vscode.Disposable {
       })
       await this.changed()
 
-      live.handle = runTask(task, cfg, run.cwd, out, resume, run.parallel)
+      live.handle = runTask(task, cfg, run.cwd, out, {
+        resume,
+        parallel: run.parallel,
+        sessionName: `plan-queue ${run.title} ${task.id}`,
+      })
       const result = await live.handle.result
       live.handle = undefined
+      denied = [...new Set([...denied, ...result.denied])]
 
       // Cost and time add up across the turns of one task.
       const costUsd =
@@ -513,8 +592,8 @@ export class Queue implements vscode.Disposable {
           planPath,
           task.id,
           reopen
-            ? { status: 'waiting', reason: 'waiting for reply', question: before.question, costUsd, durationMs }
-            : { status: 'pending', costUsd, durationMs },
+            ? { status: 'waiting', reason: 'waiting for reply', question: before.question, costUsd, durationMs, denied }
+            : { status: 'pending', costUsd, durationMs, denied },
         )
         if (!reopen) await this.leaveBehind(run, live, out)
         await this.changed()
@@ -523,7 +602,8 @@ export class Queue implements vscode.Disposable {
 
       if (result.silent && !nudged) {
         nudged = true
-        nudge = NUDGE
+        out.appendLine('  no sentinel; asking the task whether it is done, blocked or asking something')
+        followUp = { text: NUDGE, label: 'asked about its missing sentinel' }
         await this.state.set(planPath, task.id, { sessionId: result.sessionId, costUsd, durationMs })
         continue
       }
@@ -536,6 +616,7 @@ export class Queue implements vscode.Disposable {
           sessionId: result.sessionId,
           costUsd,
           durationMs,
+          denied,
         })
         await this.changed()
         // Round again: the same task comes up, and waits for the answer.
@@ -555,8 +636,22 @@ export class Queue implements vscode.Disposable {
           }),
         )
         run.gateLock = gated.catch(() => undefined)
-        ok = await gated
-        if (!ok) reason = 'gate failed'
+        const g = await gated
+        ok = g.ok
+        if (!ok) reason = g.timedOut ? 'gate timed out' : 'gate failed'
+        const retries = Math.max(0, c.get<number>('gateRetries', 1))
+        if (!ok && !run.stopRequested && result.sessionId && gateFixes < retries) {
+          // Hand the gate's output back to the session that did the work, rather
+          // than throwing that context away.
+          gateFixes++
+          out.appendLine(`  ${reason}; handing its output back to the task (${gateFixes} of ${retries})`)
+          followUp = {
+            text: gateFixPrompt(gate, g.output, gateFixes, retries),
+            label: `gate failed — output handed back, ${gateFixes} of ${retries}`,
+          }
+          await this.state.set(planPath, task.id, { sessionId: result.sessionId, costUsd, durationMs })
+          continue
+        }
         if (run.stopRequested) {
           // Stopped mid-gate: the work is unverified, so it is not done.
           await this.state.set(planPath, task.id, { status: 'pending', costUsd, durationMs })
@@ -585,6 +680,7 @@ export class Queue implements vscode.Disposable {
         }
       }
 
+      if (!ok && denied.length) reason = `${reason ?? 'blocked'} · denied ${denied.join(', ')}`
       await this.state.set(planPath, task.id, {
         status: ok ? 'done' : 'blocked',
         reason: ok ? undefined : reason,
@@ -592,15 +688,24 @@ export class Queue implements vscode.Disposable {
         costUsd,
         durationMs,
         sessionId: result.sessionId,
+        denied,
       })
       await this.changed()
       run.ran++
 
       if (!ok) {
         await this.leaveBehind(run, live, out)
+        const allow = denied.length ? `Allow ${denied.join(', ')}` : undefined
         void vscode.window
-          .showErrorMessage(`Plan Queue — ${task.id} did not finish: ${reason ?? 'unknown'}`, 'Show log')
-          .then((pick) => pick && run.out.show())
+          .showErrorMessage(
+            `Plan Queue — ${task.id} did not finish: ${reason ?? 'unknown'}`,
+            'Show log',
+            ...(allow ? [allow] : []),
+          )
+          .then(async (pick) => {
+            if (pick === 'Show log') run.out.show()
+            else if (pick && pick === allow) await allowTools(denied)
+          })
         // Tasks already going are left to finish; nothing new starts.
         if (c.get<boolean>('stopOnFailure', true)) run.halted = true
       }
@@ -738,7 +843,7 @@ export class Queue implements vscode.Disposable {
     const setup = c.get<string>('worktreeSetupCommand', '')
     if (!setup.trim()) return
     run.out.appendLine('  setting up the worktree')
-    const ok = await runGate(setup, wt.cwd, run.out, {
+    const { ok } = await runGate(setup, wt.cwd, run.out, {
       timeoutMs: c.get<number>('gateTimeoutMinutes', 30) * 60_000,
       signal: run.abort.signal,
     })
@@ -860,4 +965,26 @@ export class Queue implements vscode.Disposable {
     }
     this.tree.refresh()
   }
+}
+
+/**
+ * Add allowlist entries where `allowedTools` is set now — the workspace's
+ * value if it has one, your user settings otherwise — keeping what is there.
+ */
+export async function allowTools(rules: string[]): Promise<void> {
+  const c = vscode.workspace.getConfiguration('planQueue')
+  const current = c.get<string[]>('allowedTools', [])
+  const add = rules.filter((r) => !current.includes(r))
+  if (!add.length) return
+  const inspect = c.inspect<string[]>('allowedTools')
+  const target =
+    inspect?.workspaceFolderValue !== undefined
+      ? vscode.ConfigurationTarget.WorkspaceFolder
+      : inspect?.workspaceValue !== undefined
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global
+  await c.update('allowedTools', [...current, ...add], target)
+  void vscode.window.showInformationMessage(
+    `Plan Queue — allowed ${add.join(', ')}. Run the task again to use it.`,
+  )
 }
