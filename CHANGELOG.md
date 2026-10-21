@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - **Parallel tasks in one plan.** A task that declares `Depends on: T1, T2` in
   its prompt starts as soon as those are done, so tasks sharing a dependency run
