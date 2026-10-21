@@ -91,3 +91,23 @@ test('a task with no Depends on line has no deps, which is not the same as none'
   const [t] = parsePlanText('## Prompts\n\n### T1 — x\n\n> Do it, and it depends on the schema being there.\n', '/x/p.md').tasks
   assert.equal(t.deps, undefined)
 })
+
+test('headings inside a fenced prompt do not end it or the section', () => {
+  const p = parsePlanText(
+    '## Prompts\n\n### T1 — a\n\n```\nWrite this doc:\n\n## Goals\n\n### Notes\nx\n```\n\n### T2 — b\n\n> hi\n',
+    '/x/p.md',
+  )
+  assert.deepEqual(p.tasks.map((t) => t.id), ['T1', 'T2'])
+  assert.equal(p.tasks[0].prompt, 'Write this doc:\n\n## Goals\n\n### Notes\nx')
+})
+
+test('headings inside a fence quoted in a blockquote stay in the prompt', () => {
+  const p = parsePlanText('## Prompts\n\n### T1 — a\n\n> Make:\n> ```md\n> ## Goals\n> ```\n\n### T2 — b\n\n> hi\n', '/x/p.md')
+  assert.deepEqual(p.tasks.map((t) => t.id), ['T1', 'T2'])
+  assert.match(p.tasks[0].prompt, /## Goals/)
+})
+
+test('a ## Prompts heading shown inside a fence is not the section', () => {
+  const p = parsePlanText('# Notes\n\n```md\n## Prompts\n\n### T1 — a\n\n> x\n```\n', '/x/p.md')
+  assert.deepEqual(p.tasks, [])
+})
