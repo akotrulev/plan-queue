@@ -122,6 +122,38 @@ export async function stashAll(dir: string, message: string): Promise<string | u
   return must(['rev-parse', '--short', 'stash@{0}'], dir)
 }
 
+/**
+ * Where the plan is now, inside its worktree. A task may move its own plan — a
+ * close-out filing it under `implemented/` — or rename it, committed or not.
+ * Looks in place, then for the same file name under the plan's folder, then
+ * for a rename git detects since the branch was cut from `base`. Undefined
+ * when the plan is gone.
+ */
+export async function locatePlan(dir: string, base: string, rel: string): Promise<string | undefined> {
+  const here = path.join(dir, rel)
+  if (await isFile(here)) return here
+
+  const folder = path.join(dir, path.dirname(rel))
+  const name = path.basename(rel)
+  const under = await fs.readdir(folder, { recursive: true }).catch(() => [] as string[])
+  const moved = under.filter((p) => path.basename(p) === name).sort((a, b) => a.length - b.length)[0]
+  if (moved && (await isFile(path.join(folder, moved)))) return path.join(folder, moved)
+
+  // -z: one field per NUL, so a path is never quoted. Each rename is R<score>, old, new.
+  const r = await git(['diff', '-M', '-z', '--name-status', '--diff-filter=R', base], dir)
+  if (r.code !== 0) return undefined
+  const fields = r.stdout.split('\0')
+  const from = rel.split(path.sep).join('/')
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    if (fields[i + 1] === from && (await isFile(path.join(dir, fields[i + 2])))) return path.join(dir, fields[i + 2])
+  }
+  return undefined
+}
+
+async function isFile(p: string): Promise<boolean> {
+  return (await fs.stat(p).catch(() => undefined))?.isFile() ?? false
+}
+
 let mergeLock: Promise<unknown> = Promise.resolve()
 
 /**

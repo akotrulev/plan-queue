@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+- **A plan that moves itself still merges.** A task may move or rename its own
+  plan inside the worktree — a close-out filing it under `implemented/`. The
+  queue now follows it (same name under the plan's folder, or a rename git
+  detects) instead of failing on the old path and never merging. A plan that
+  was deleted rather than moved stops with that said in the log.
+- A plan that fails outside a task now writes the reason to its log, not only
+  to a notification.
+
 ## 0.3.0
 
 - **Parallel tasks in one plan.** A task that declares `Depends on: T1, T2` in

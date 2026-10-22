@@ -10,6 +10,7 @@ import {
   currentBranch,
   ensureWorktree,
   isDirty,
+  locatePlan,
   mergeBranch,
   removeWorktree,
   repoRoot,
@@ -138,4 +139,33 @@ test('stashAll puts edits and new files away, and is a no-op on a clean tree', a
   assert.match(ref, /^[0-9a-f]{7,}$/)
   assert.equal(sh(repo, 'status', '--porcelain'), '')
   assert.match(sh(repo, 'stash', 'list'), /leftovers of T3/)
+})
+
+test('locatePlan follows a plan its own task moved or renamed', async () => {
+  const { root, repo } = scratchRepo()
+  fs.mkdirSync(path.join(repo, 'docs/plans'), { recursive: true })
+  fs.writeFileSync(path.join(repo, 'docs/plans/115-cloud.md'), '# 115 — cloud\n\n## Prompts\n')
+  sh(repo, 'add', '-A')
+  sh(repo, 'commit', '-q', '-m', 'plan')
+  const a = wtFor(root, 'a')
+  await ensureWorktree(repo, a)
+  const rel = 'docs/plans/115-cloud.md'
+
+  // Where it was cut: found in place.
+  assert.equal(await locatePlan(a.dir, a.base, rel), path.join(a.dir, rel))
+
+  // Its close-out files it under implemented/, not yet committed.
+  fs.mkdirSync(path.join(a.dir, 'docs/plans/implemented'))
+  fs.renameSync(path.join(a.dir, rel), path.join(a.dir, 'docs/plans/implemented/115-cloud.md'))
+  assert.equal(await locatePlan(a.dir, a.base, rel), path.join(a.dir, 'docs/plans/implemented/115-cloud.md'))
+
+  // Renamed and committed: followed through git's rename detection.
+  fs.renameSync(path.join(a.dir, 'docs/plans/implemented/115-cloud.md'), path.join(a.dir, 'docs/plans/implemented/115-public-url.md'))
+  await commitAll(a.dir, 'a: B3')
+  assert.equal(await locatePlan(a.dir, a.base, rel), path.join(a.dir, 'docs/plans/implemented/115-public-url.md'))
+
+  // Deleted outright: nothing to follow.
+  sh(a.dir, 'rm', '-q', 'docs/plans/implemented/115-public-url.md')
+  await commitAll(a.dir, 'a: gone')
+  assert.equal(await locatePlan(a.dir, a.base, rel), undefined)
 })
