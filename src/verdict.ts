@@ -77,3 +77,12 @@ export const NUDGE = [
   `If you need an answer from a person, restate the question briefly and end with a line "${SENTINEL_ASK}".`,
   'Do not do any more work in this reply.',
 ].join(' ')
+
+/** Sent to a paused task when it is resumed: the session picks up where it was cut off. */
+export const RESUMED = [
+  'The queue paused this task part-way through, and has now resumed it in the same session.',
+  'A tool call cut off by the pause shows as rejected or declined: that was the pause, not a person refusing it, so run it again if it is still needed.',
+  'Whatever else was running when it paused — a command, a test run — was interrupted too; check its state before relying on it.',
+  'Carry on from where you stopped. If the work had in fact already landed, say so.',
+  `End as before, with "${SENTINEL_OK}", "${SENTINEL_BAD} <one-line reason>" or a question and "${SENTINEL_ASK}".`,
+].join(' ')

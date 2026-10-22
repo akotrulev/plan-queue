@@ -63,6 +63,8 @@ export interface RunResult {
   durationMs: number
   sessionId?: string
   cancelled?: boolean
+  /** Interrupted by a pause: the session is kept, to be resumed later. */
+  paused?: boolean
   /** The agent is asking a person something, or ended with no sentinel (see `silent`). */
   waiting?: boolean
   /** No sentinel at all: the queue asks the agent once what it meant before waiting on a person. */
@@ -87,6 +89,11 @@ export interface TaskRunOptions {
   parallel?: boolean
   /** The session's display name, so `claude --resume` can tell plans apart. */
   sessionName?: string
+  /**
+   * Called as soon as the CLI names the session, long before the result, so a
+   * window that closes mid-task still knows which session to resume.
+   */
+  onSession?: (sessionId: string) => void
 }
 
 export interface RunConfig {
@@ -171,6 +178,13 @@ export interface RunHandle {
   result: Promise<RunResult>
   cancel(): void
   /**
+   * Interrupt the turn in flight, keeping the session so it can be resumed.
+   * The CLI is asked to stop the turn itself, which leaves its transcript
+   * whole; if it has not ended a few seconds later, it is killed. `now` kills
+   * it straight after asking — for a window that is closing and cannot wait.
+   */
+  pause(now?: boolean): void
+  /**
    * Hand the running task another user message. Delivered on the same stdin
    * stream the prompt went down, so it lands in the turn already in flight.
    * Returns false when the task is not (or no longer) accepting input.
@@ -198,6 +212,7 @@ export function runTask(
   const { resume, parallel = false } = opts
   let child: ChildProcess | undefined
   let cancelled = false
+  let paused = false
   // The partial output line, shared so a message sent mid-task can flush it
   // before printing itself.
   let pending = ''
@@ -249,6 +264,7 @@ export function runTask(
     out.appendLine('')
 
     if (cancelled) return { ok: false, cancelled: true, durationMs: 0, reason: 'cancelled', denied: [] }
+    if (paused) return { ok: false, paused: true, durationMs: 0, reason: 'paused', denied: [] }
 
     child = spawn(cfg.claudePath, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: OWN_GROUP })
     // stdin stays open for the whole run so messages can be sent mid-task; it
@@ -292,7 +308,10 @@ export function runTask(
       } catch {
         return
       }
-      if (msg.type === 'system' && msg.session_id) sessionId = msg.session_id
+      if (msg.type === 'system' && msg.session_id && msg.session_id !== sessionId) {
+        sessionId = msg.session_id
+        opts.onSession?.(msg.session_id)
+      }
       if (msg.type === 'stream_event' && msg.event?.type === 'content_block_delta') {
         const d = msg.event.delta
         write(d?.text ?? (cfg.logThinking ? d?.thinking : undefined) ?? '')
@@ -358,6 +377,10 @@ export function runTask(
       out.appendLine(`\n--- ${task.id} cancelled`)
       return { ok: false, cancelled: true, durationMs, reason: 'cancelled', sessionId, denied }
     }
+    if (paused) {
+      out.appendLine(`\n--- ${task.id} paused${sessionId ? '; resuming it picks up this session' : ''}`)
+      return { ok: false, paused: true, durationMs, reason: 'paused', costUsd, sessionId, denied }
+    }
     if (code !== 0) {
       const reason = stderr.trim().split('\n').slice(-3).join(' ') || `claude exited ${code}`
       out.appendLine(`\n--- ${task.id} FAILED: ${reason}`)
@@ -411,9 +434,25 @@ export function runTask(
       child?.stdin?.end()
       reap(child)
     },
+    pause(now = false) {
+      if (cancelled || paused) return
+      paused = true
+      const stdin = child?.stdin
+      if (stdin?.writable && !stdin.writableEnded) {
+        stdin.write(
+          JSON.stringify({ type: 'control_request', request_id: `pause-${Date.now()}`, request: { subtype: 'interrupt' } }) +
+            '\n',
+        )
+        const c = child
+        if (now) return reap(c)
+        setTimeout(() => {
+          if (c && c.exitCode === null && c.signalCode === null) reap(c)
+        }, 10_000).unref()
+      } else reap(child)
+    },
     send(text: string) {
       const trimmed = text.trim()
-      if (!trimmed || cancelled) return false
+      if (!trimmed || cancelled || paused) return false
       const stdin = child?.stdin
       if (!stdin || !stdin.writable || stdin.writableEnded) return false
       flush()

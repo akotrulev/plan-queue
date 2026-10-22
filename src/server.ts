@@ -36,6 +36,7 @@ const INSTRUCTIONS = [
   'list_plans shows what exists; run_plan starts one and returns at once, then poll plan_status.',
   'Tasks that declare `Depends on:` run in parallel when their dependencies are done.',
   'A task whose status is "waiting" has asked a question (see its `question`): answer it with reply.',
+  'A task whose status is "paused" keeps its session: resume carries on in it.',
   'Do not start a plan from inside one of its own tasks.',
 ].join(' ')
 
@@ -291,6 +292,7 @@ export class ControlServer implements vscode.Disposable {
               total: s.tasks.length,
               waiting: s.tasks.filter((t) => t.status === 'waiting').map((t) => t.id),
               blocked: s.tasks.filter((t) => t.status === 'blocked').map((t) => t.id),
+              paused: s.tasks.filter((t) => t.status === 'paused').map((t) => t.id),
             }
           }),
       },
@@ -340,6 +342,32 @@ export class ControlServer implements vscode.Disposable {
           const plan = a.plan ? await this.resolve(a.plan) : undefined
           this.queue.stop(plan?.path)
           return { stopped: plan ? this.rel(plan) : 'all' }
+        },
+      },
+      {
+        name: 'pause',
+        description:
+          'Pause one task, a whole plan, or every plan when none is named. A paused task is interrupted with its session kept, and its changes stay in the tree; resume carries on in that session. Waiting tasks stay waiting.',
+        inputSchema: { type: 'object', properties: { plan: planArg, task: taskArg } },
+        run: async (a) => {
+          const plan = a.plan ? await this.resolve(a.plan) : undefined
+          if (a.task && !plan) throw new ToolError('name the plan the task belongs to')
+          if (!this.queue.pause(plan?.path, a.task ? String(a.task) : undefined)) {
+            throw new ToolError(a.task ? `${a.task} is not working right now` : 'nothing is running')
+          }
+          return { pausing: [plan ? this.rel(plan) : 'all', a.task].filter(Boolean).join(' ') }
+        },
+      },
+      {
+        name: 'resume',
+        description:
+          'Carry on after a pause. A plan that is not running starts again (from the task, when named), and each paused task resumes its own session. On a running plan, a paused task starts again now.',
+        inputSchema: { type: 'object', properties: { plan: planArg, task: taskArg }, required: ['plan'] },
+        run: async (a) => {
+          const plan = await this.resolve(a.plan)
+          const id = a.task ? String(a.task) : undefined
+          if (id && !plan.tasks.some((t) => t.id === id)) throw new ToolError(`${this.rel(plan)} has no task ${id}`)
+          return started(this.queue.resume(plan.path, id), [this.rel(plan), id].filter(Boolean).join(' '))
         },
       },
       {

@@ -72,3 +72,10 @@ test('only runs exactly one task, whatever it depends on', () => {
   assert.deepEqual(ready(plan, {}, { onlyId: 'T2' }), ['T2'])
   assert.deepEqual(ready(plan, {}, { onlyId: 'T2', attempted: ['T2'] }), [])
 })
+
+test('a paused task is picked up again, and holds back what follows it even once it is out of the run', () => {
+  const plan = [t('T1'), t('T2'), t('T3', [])]
+  assert.deepEqual(ready(plan, { T1: 'paused' }), ['T1', 'T3'])
+  // Paused mid-run: unlike a failed task, it does not let T2 through.
+  assert.deepEqual(ready(plan, { T1: 'paused' }, { attempted: ['T1'] }), ['T3'])
+})

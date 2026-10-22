@@ -2,7 +2,7 @@ import * as vscode from 'vscode'
 import type { Worktree } from './git'
 import type { Plan, Task } from './plan'
 
-export type Status = 'pending' | 'running' | 'waiting' | 'done' | 'blocked' | 'failed' | 'skipped'
+export type Status = 'pending' | 'running' | 'waiting' | 'paused' | 'done' | 'blocked' | 'failed' | 'skipped'
 
 export interface TaskState {
   status: Status
@@ -145,13 +145,18 @@ export class StateStore {
   }
 
   /**
-   * Clear any 'running' left behind by a window that closed mid-task. A task
-   * that is 'waiting' stays so: its session can still be answered.
+   * Settle any 'running' left behind by a window that closed mid-task. One
+   * whose session had started is 'paused', so running it again resumes that
+   * session; one that never got that far is 'pending'. A task that is
+   * 'waiting' stays so: its session can still be answered.
    */
   async clearRunning(): Promise<void> {
     for (const plan of Object.values(this.store)) {
       for (const [id, task] of Object.entries(plan.tasks)) {
-        if (task.status === 'running') plan.tasks[id] = { ...task, status: 'pending' }
+        if (task.status !== 'running') continue
+        plan.tasks[id] = task.sessionId
+          ? { ...task, status: 'paused', reason: 'interrupted when the window closed' }
+          : { ...task, status: 'pending' }
       }
     }
     await this.save()

@@ -91,6 +91,10 @@ Each task is one `claude -p` invocation, so each gets a genuinely fresh context.
   stops every running plan; on a plan, just that one. Each task (and each gate)
   runs in a process group of its own, so Stop also takes down what it started:
   a dev server, a test watcher. The same happens when a task ends normally.
+- **Pause** (the pause button on a running task, on a plan, or in the view
+  title for every plan) interrupts the task but keeps its session: the task
+  goes to `paused`, and its changes stay in the tree. See
+  [Pausing and resuming](#pausing-and-resuming).
 - **Message the running task** (the speech-bubble button in the view title, `cmd+alt+m` /
   `ctrl+alt+m`, or the command palette) types into the task already in flight —
   the same as interjecting in an interactive session. The task's stdin stays
@@ -190,6 +194,29 @@ work — with a request to fix the cause and run the gate itself. The gate then
 runs again. `planQueue.gateRetries` (default 1) sets how many times; 0 fails the
 task at once.
 
+### Pausing and resuming
+
+*Pause* asks the task's Claude session to stop its turn — the same as pressing
+Esc in an interactive session — and keeps the session. A paused task is orange
+in the tree, and its plan shows `paused T3`.
+
+- **Resume** (the task's inline button, or right-click) carries on in the same
+  session (`claude -p --resume <session>`), told it was paused and to check
+  anything that was cut off — a test run, say — before relying on it. Running
+  the plan again does the same: a paused task always resumes its session rather
+  than starting over.
+- Pausing a plan pauses all its working tasks and starts nothing new. Pausing
+  one task leaves the rest of the plan running, but tasks that wait for it — by
+  order or by `Depends on:` — keep waiting.
+- A task paused mid-gate resumes its session to finish, and the gate runs again.
+- **Closing the window pauses.** The session id is saved the moment a task's
+  session starts, so a task cut off by VS Code closing — or crashing — is
+  `paused` when the window opens again, not `pending`. Run or resume the plan
+  to pick it up. Nothing is resumed automatically.
+- A paused task's changes stay in the worktree, and are not stashed if another
+  task fails. A task that passes beside it is committed with them in it.
+- A task waiting for your reply is not paused; it stays waiting.
+
 ### Logs
 
 Each plan has an output channel, **Plan Queue — <plan title>**. It shows what
@@ -286,6 +313,8 @@ these tools:
 | `message` | type into a task that is working |
 | `get_log` | the last lines of the plan's log, or of one task's transcript |
 | `stop` | stop one plan or all |
+| `pause` | pause a task, a plan, or all, keeping each session |
+| `resume` | carry on after a pause, in the same session |
 
 The same calls from a shell, which is also what an LLM with only a Bash tool
 can use:
@@ -295,6 +324,8 @@ pq list
 pq run storefront                # a path, file name or title; a fragment is enough
 pq status storefront
 pq reply storefront T3 use soft-delete
+pq pause storefront T3           # or the whole plan: pq pause storefront
+pq resume storefront T3
 pq task storefront T5 --now
 pq log storefront 120
 pq log storefront T3             # that task's latest transcript

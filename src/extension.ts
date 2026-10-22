@@ -276,6 +276,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     vscode.commands.registerCommand('planQueue.stop', () => queue.stop()),
 
+    vscode.commands.registerCommand('planQueue.pause', () => queue.pause()),
+
+    vscode.commands.registerCommand('planQueue.pausePlan', (node?: Node) => {
+      if (node) queue.pause(node.plan.path)
+    }),
+
+    vscode.commands.registerCommand('planQueue.pauseTask', (node?: Node) => {
+      const t = asTask(node)
+      if (t && !queue.pause(t.plan.path, t.task.id)) {
+        void vscode.window.showInformationMessage(`Plan Queue — ${t.task.id} is not working right now.`)
+      }
+    }),
+
+    vscode.commands.registerCommand('planQueue.resume', async (node?: Node) => {
+      const path = await resolvePlanPath(node)
+      if (!path) return
+      const r = queue.resume(path, asTask(node)?.task.id)
+      if (!r.ok) void vscode.window.showWarningMessage(`Plan Queue — not resumed: ${r.reason}.`)
+    }),
+
     vscode.commands.registerCommand('planQueue.stopPlan', (node?: Node) => {
       if (node) queue.stop(node.plan.path)
     }),

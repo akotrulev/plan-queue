@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- **Pause and resume.** *Pause* (on a running task, on a plan, or in the view
+  title for every plan) interrupts the turn in flight but keeps its Claude
+  session, and the task turns `paused`. Its changes stay in the tree. *Resume*
+  — or just running the plan again — carries on in that same session, with its
+  whole context. Tasks after a paused one wait for it.
+- **Closing VS Code pauses, it no longer resets.** A task's session id is saved
+  as soon as the session starts, so a task cut off by the window closing (or
+  crashing) comes back `paused` rather than `pending`, and resuming picks up its
+  session instead of starting over.
+- MCP: `pause` and `resume` tools; `pq pause` and `pq resume`.
+
 ## 0.3.2
 
 - **A red test no longer stops a task.** The note every task gets now says a red

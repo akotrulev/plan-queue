@@ -18,7 +18,7 @@ import { readPlan, type Task } from './plan'
 import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
 import { readyTasks, unknownDeps } from './schedule'
 import { gateFixPrompt } from './describe'
-import { NUDGE } from './verdict'
+import { NUDGE, RESUMED } from './verdict'
 import type { PlanWorktree, StateStore } from './state'
 import type { PlanTree } from './tree'
 
@@ -92,6 +92,10 @@ interface Live {
   waiting?: { answer: (reply: string | undefined) => void }
   /** Using a slot: false while it waits for a person, so that does not hold up the others. */
   busy: boolean
+  /** Asked to pause: whatever turn or gate it is in ends, and its session is kept. */
+  pausing?: boolean
+  /** Aborted on a pause of this task alone: kills its gate. */
+  abort: AbortController
 }
 
 /** One plan being worked through. Several can be in flight, one per plan. */
@@ -112,6 +116,8 @@ interface Run {
   halted: boolean
   /** The loop is done launching; too late to add to it. */
   closing: boolean
+  /** Tasks paused during this run. */
+  paused: string[]
   /** Runs in the workspace itself rather than a worktree, so it has the folder to itself. */
   inPlace: boolean
   /** Tasks may share the working tree at the same moment. */
@@ -290,8 +296,63 @@ export class Queue implements vscode.Disposable {
     }
   }
 
+  /**
+   * Pause one task, or every task of a plan, or of every plan. Each is
+   * interrupted with its session kept and goes to 'paused'; resuming carries on
+   * in that session. Pausing a whole plan also stops it starting anything new.
+   * A task waiting on a question stays waiting. False when nothing was running.
+   */
+  pause(planPath?: string, taskId?: string, now = false): boolean {
+    let any = false
+    for (const run of this.runs.values()) {
+      if (planPath && run.planPath !== planPath) continue
+      if (taskId) {
+        const live = run.live.get(taskId)
+        if (!live || live.waiting) continue
+        this.pauseLive(live, now)
+        any = true
+        continue
+      }
+      run.stopRequested = true
+      run.abort.abort()
+      for (const live of run.live.values()) {
+        if (live.waiting) live.waiting.answer(undefined)
+        else this.pauseLive(live, now)
+      }
+      any = true
+      this.kick(run)
+    }
+    return any
+  }
+
+  private pauseLive(live: Live, now: boolean): void {
+    live.pausing = true
+    live.abort.abort()
+    live.handle?.pause(now)
+  }
+
+  /**
+   * Carry on after a pause. A plan that is not running starts again — from the
+   * task, when one is named — and a paused task resumes its own session. On a
+   * plan that is still running, the paused task starts again now.
+   */
+  resume(planPath: string, taskId?: string): { ok: true } | { ok: false; reason: string } {
+    const run = this.runs.get(planPath)
+    if (!run) return this.start(planPath, taskId ? { fromId: taskId } : {})
+    if (!taskId) return { ok: false, reason: 'this plan is already running' }
+    if (this.state.get(planPath, taskId).status !== 'paused') return { ok: false, reason: `${taskId} is not paused` }
+    if (run.closing || run.stopRequested) return { ok: false, reason: 'the plan is stopping; resume it again in a moment' }
+    if (run.live.has(taskId)) return { ok: false, reason: `${taskId} is still pausing` }
+    run.attempted.delete(taskId)
+    if (run.live.size) run.parallel = true
+    run.forced.push(taskId)
+    this.kick(run)
+    return { ok: true }
+  }
+
+  /** Closing the window pauses what is running, so it can be resumed when it opens again. */
   dispose(): void {
-    this.stop()
+    this.pause(undefined, undefined, true)
     for (const out of this.channels.values()) out.dispose()
   }
 
@@ -387,6 +448,7 @@ export class Queue implements vscode.Disposable {
       stopRequested: false,
       halted: false,
       closing: false,
+      paused: [],
       inPlace: false,
       parallel: false,
       initialReply:
@@ -431,7 +493,11 @@ export class Queue implements vscode.Disposable {
       run.closing = true
       this.runs.delete(planPath)
       await this.changed()
-      if (run.ran && !run.stopRequested) {
+      if (run.paused.length && !run.stopRequested) {
+        void vscode.window.showInformationMessage(
+          `Plan Queue — ${title}: ${run.paused.join(', ')} paused. Resume picks up where it stopped.`,
+        )
+      } else if (run.ran && !run.stopRequested) {
         void vscode.window.showInformationMessage(`Plan Queue — ${title}: finished ${run.ran} task(s).`)
       }
     }
@@ -498,7 +564,7 @@ export class Queue implements vscode.Disposable {
 
   /** Start a task without waiting for it; it tells the loop when it is done. */
   private launch(run: Run, task: Task): void {
-    const live: Live = { task, busy: true }
+    const live: Live = { task, busy: true, abort: new AbortController() }
     run.live.set(task.id, live)
     run.attempted.add(task.id)
     void this.changed()
@@ -542,9 +608,15 @@ export class Queue implements vscode.Disposable {
     let nudged = false
     let gateFixes = 0
     let denied: string[] = []
+    let ran = false
 
     for (;;) {
       const before = this.state.get(planPath, task.id)
+      if (live.pausing && before.status !== 'waiting') {
+        // Paused between turns, before a follow-up. A session from an earlier run is not this one.
+        await this.setPaused(run, live, ran || before.status === 'paused' ? before.sessionId : undefined, out, {})
+        return
+      }
       let resume: (Resume & { kind: 'reply' | 'queue' }) | undefined
       if (followUp && before.sessionId) {
         resume = { sessionId: before.sessionId, reply: followUp.text, label: followUp.label, kind: 'queue' }
@@ -553,6 +625,8 @@ export class Queue implements vscode.Disposable {
         // A task that asked something picks up its own session once answered;
         // it waits here meanwhile, and the rest of the plan, and other plans, carry on.
         live.busy = false
+        // A question that arrived as the task was being paused wins: it waits for the answer instead.
+        live.pausing = false
         this.kick(run)
         const answer = reply ?? (await this.awaitReply(run, live, before.question ?? ''))
         reply = undefined
@@ -560,6 +634,8 @@ export class Queue implements vscode.Disposable {
         if (answer === undefined) return
         out.appendLine(`  > ${answer.split('\n').join('\n  > ')}`)
         resume = { sessionId: before.sessionId, reply: answer, label: 'resumed with your reply', kind: 'reply' }
+      } else if (before.status === 'paused' && before.sessionId) {
+        resume = { sessionId: before.sessionId, reply: RESUMED, label: 'resumed after a pause', kind: 'queue' }
       }
 
       const cfg = readConfig()
@@ -568,6 +644,8 @@ export class Queue implements vscode.Disposable {
         reason: undefined,
         question: undefined,
         ranHash: task.hash,
+        // A fresh start must not leave an older session to be resumed by mistake.
+        sessionId: resume ? before.sessionId : undefined,
       })
       await this.changed()
 
@@ -575,9 +653,14 @@ export class Queue implements vscode.Disposable {
         resume,
         parallel: run.parallel,
         sessionName: `plan-queue ${run.title} ${task.id}`,
+        onSession: (id) => void this.state.set(planPath, task.id, { sessionId: id }),
       })
+      if (live.pausing) live.handle.pause()
       const result = await live.handle.result
       live.handle = undefined
+      ran = true
+      // Named as soon as the turn began, so this has it even when the result does not.
+      const sessionId = result.sessionId ?? this.state.get(planPath, task.id).sessionId
       denied = [...new Set([...denied, ...result.denied])]
 
       // Cost and time add up across the turns of one task.
@@ -586,6 +669,11 @@ export class Queue implements vscode.Disposable {
           ? before.costUsd + result.costUsd
           : result.costUsd ?? (resume ? before.costUsd : undefined)
       const durationMs = result.durationMs + (resume ? before.durationMs ?? 0 : 0)
+
+      if (result.paused) {
+        await this.setPaused(run, live, sessionId, out, { costUsd, durationMs, denied })
+        return
+      }
 
       if (result.cancelled) {
         // An interrupted answer leaves the question open; anything else goes back to pending.
@@ -642,6 +730,11 @@ export class Queue implements vscode.Disposable {
         ok = g.ok
         if (!ok) reason = g.timedOut ? 'gate timed out' : 'gate failed'
         const retries = Math.max(0, c.get<number>('gateRetries', 1))
+        if (!ok && live.pausing) {
+          // Paused mid-gate: the work is unverified, and the session resumes to finish it.
+          await this.setPaused(run, live, sessionId, out, { costUsd, durationMs, denied })
+          return
+        }
         if (!ok && !run.stopRequested && result.sessionId && gateFixes < retries) {
           // Hand the gate's output back to the session that did the work, rather
           // than throwing that context away.
@@ -716,6 +809,31 @@ export class Queue implements vscode.Disposable {
   }
 
   /**
+   * A paused task keeps its half-done work in the tree, for its session to
+   * pick up; nothing is stashed. Without a session there is nothing to resume,
+   * so it is simply pending again.
+   */
+  private async setPaused(
+    run: Run,
+    live: Live,
+    sessionId: string | undefined,
+    out: LogSink,
+    totals: { costUsd?: number; durationMs?: number; denied?: string[] },
+  ): Promise<void> {
+    live.busy = false
+    await this.state.set(
+      run.planPath,
+      live.task.id,
+      sessionId ? { status: 'paused', reason: 'paused', sessionId, ...totals } : { status: 'pending', ...totals },
+    )
+    if (sessionId) {
+      run.paused.push(live.task.id)
+      out.appendLine(`  ${live.task.id} paused; its changes stay in the tree for the session to pick up`)
+    }
+    await this.changed()
+  }
+
+  /**
    * A task that did not pass may have left half its work in the tree. Once
    * nothing else is in the tree, it is stashed, so the next task — and the next
    * commit — starts from what passed. With another task still there, it waits;
@@ -762,6 +880,13 @@ export class Queue implements vscode.Disposable {
       }
       const stash = vscode.workspace.getConfiguration('planQueue').get<boolean>('stashFailedWork', true)
       if (!quiet || !run.leftovers.length || !stash) return undefined
+      // A stash would take a paused task's work away from the session that is to resume it.
+      const plan = await readPlan(await this.livePlan(run), run.planPath).catch(() => undefined)
+      const paused = plan?.tasks.filter((t) => this.state.get(run.planPath, t.id).status === 'paused').map((t) => t.id) ?? []
+      if (paused.length) {
+        const left = run.leftovers.splice(0)
+        return `${left.join(', ')} left changes behind; not stashed, since ${paused.join(', ')} is paused in the same tree`
+      }
       const left = run.leftovers.splice(0)
       const ref = await stashAll(wt.dir, `plan-queue: leftovers of ${left.join(', ')} (${run.title})`)
       return ref

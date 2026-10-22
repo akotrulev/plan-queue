@@ -23,6 +23,7 @@ const ICONS: Record<Status, { icon: string; color?: string }> = {
   pending: { icon: 'circle-outline' },
   running: { icon: 'sync~spin', color: 'charts.blue' },
   waiting: { icon: 'comment-discussion', color: 'charts.yellow' },
+  paused: { icon: 'debug-pause', color: 'charts.orange' },
   done: { icon: 'pass-filled', color: 'charts.green' },
   blocked: { icon: 'error', color: 'charts.red' },
   failed: { icon: 'error', color: 'charts.red' },
@@ -98,7 +99,10 @@ export class PlanTree
     const wt = this.state.worktree(plan.path)
     const live = this.isRunning(plan.path)
     const dup = plan.duplicates.length ? ` · ⚠ duplicate ${plan.duplicates.join(', ')}` : ''
-    item.description = `${done}/${tasks.length}${wt ? ` · ${wt.branch}` : ''}${dup}`
+    const paused = tasks.filter((t) => this.state.get(plan.path, t.id).status === 'paused').map((t) => t.id)
+    item.description =
+      `${done}/${tasks.length}${paused.length ? ` · paused ${paused.join(', ')}` : ''}` +
+      `${wt ? ` · ${wt.branch}` : ''}${dup}`
     // plan[.live][.wt] — the menus key on both.
     item.contextValue = `plan${live ? '.live' : ''}${wt ? '.wt' : ''}`
     item.iconPath = new vscode.ThemeIcon(
@@ -152,6 +156,7 @@ Branch: ${wt.branch}, merges into ${wt.base}`
         node.task.deps ? `Depends on: ${node.task.deps.join(', ') || 'nothing — starts at once'}` : '',
         `Status: ${st.status}${st.reason ? ` — ${st.reason}` : ''}`,
         st.status === 'waiting' && st.question ? `**It asked:**\n\n${tail(st.question, 1200)}` : '',
+        st.status === 'paused' ? 'Resume carries on in the same session, with its changes still in the tree.' : '',
         rewritten ? '\n⚠ The prompt changed since this task ran.' : '',
         '\n---\n',
         node.task.prompt.slice(0, 1200) + (node.task.prompt.length > 1200 ? '\n\n…' : ''),

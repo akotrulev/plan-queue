@@ -16,6 +16,8 @@ const USAGE = `pq — control Plan Queue
   pq message <plan> [T3] -- <text...>      type into a task that is working
   pq log <plan> [T3] [lines]               tail the plan's log, or a task's transcript
   pq stop [plan]                           stop one plan, or all
+  pq pause [plan] [T3]                     pause a task, a plan, or all; the session is kept
+  pq resume <plan> [T3]                    carry on after a pause, in the same session
 
 <plan> is a path, file name or title; a unique fragment is enough.
 Exit status is 1 when the server refuses.`
@@ -102,6 +104,12 @@ switch (cmd) {
   }
   case 'stop':
     out = await call('stop', { plan: rest[0] })
+    break
+  case 'pause':
+    out = await call('pause', { plan: rest[0], task: rest[1] })
+    break
+  case 'resume':
+    out = await call('resume', { plan: rest[0], task: rest[1] })
     break
   default:
     console.log(USAGE)

@@ -21,7 +21,8 @@ const settled = (status: string) => status === 'done' || status === 'skipped'
  * tasks to be done; one without waits for every task before it, which is the
  * sequential queue it always was. Such an implicit wait is also released by a
  * task that was attempted and failed, so that with `stopOnFailure` off the
- * queue still carries on past it. A declared dependency never is.
+ * queue still carries on past it. A declared dependency never is. A paused
+ * task releases nothing: it is unfinished work, not a failure.
  */
 export function readyTasks(input: ScheduleInput): Task[] {
   const { ordered, status, attempted, live, fromId, onlyId } = input
@@ -50,7 +51,7 @@ export function readyTasks(input: ScheduleInput): Task[] {
             j >= from &&
             j < i &&
             !settled(status(t.id)) &&
-            (live.has(t.id) || !attempted.has(t.id)),
+            (live.has(t.id) || !attempted.has(t.id) || status(t.id) === 'paused'),
         )
     if (!unmet) out.push(task)
   })

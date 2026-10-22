@@ -118,6 +118,30 @@
         "icon": "$(debug-stop)"
       },
       {
+        "command": "planQueue.pause",
+        "title": "Pause all running plans",
+        "category": "Plan Queue",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "planQueue.pausePlan",
+        "title": "Pause this plan",
+        "category": "Plan Queue",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "planQueue.pauseTask",
+        "title": "Pause this task",
+        "category": "Plan Queue",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "planQueue.resume",
+        "title": "Resume",
+        "category": "Plan Queue",
+        "icon": "$(debug-continue)"
+      },
+      {
         "command": "planQueue.toggleSkip",
         "title": "Skip / unskip",
         "category": "Plan Queue",
@@ -247,6 +271,11 @@
           "group": "navigation@0"
         },
         {
+          "command": "planQueue.pause",
+          "when": "view == planQueue.tasks && planQueue.running",
+          "group": "navigation@1"
+        },
+        {
           "command": "planQueue.stop",
           "when": "view == planQueue.tasks && planQueue.running",
           "group": "navigation@1"
@@ -370,13 +399,38 @@
         },
         {
           "command": "planQueue.resumeInTerminal",
-          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(done|blocked|failed|waiting|pending)/",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(done|blocked|failed|waiting|paused|pending)/",
           "group": "4_show@3"
         },
         {
           "command": "planQueue.allowDenied",
           "when": "view == planQueue.tasks && viewItem =~ /^task\\.blocked/",
           "group": "2_state@4"
+        },
+        {
+          "command": "planQueue.pauseTask",
+          "when": "view == planQueue.tasks && viewItem == task.running.live",
+          "group": "inline@0"
+        },
+        {
+          "command": "planQueue.pauseTask",
+          "when": "view == planQueue.tasks && viewItem == task.running.live",
+          "group": "1_run@0"
+        },
+        {
+          "command": "planQueue.resume",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.paused/",
+          "group": "inline@0"
+        },
+        {
+          "command": "planQueue.resume",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.paused/",
+          "group": "1_run@0"
+        },
+        {
+          "command": "planQueue.pausePlan",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.live/",
+          "group": "inline@0"
         }
       ],
       "commandPalette": [
@@ -454,6 +508,14 @@
         },
         {
           "command": "planQueue.allowDenied",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.pausePlan",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.pauseTask",
           "when": "false"
         }
       ]
