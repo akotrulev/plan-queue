@@ -72,8 +72,8 @@ export function verdict(opts: {
 /** Sent, once, to a task that ended its turn with no sentinel. */
 export const NUDGE = [
   'Your last message ended with none of the queue\'s lines, so the queue cannot tell how the task went.',
-  `If the task is finished and its gate passed, reply with only "${SENTINEL_OK}".`,
-  `If it cannot be finished, reply with only "${SENTINEL_BAD} <one-line reason>".`,
+  `If the task's work landed (a test you believe is wrong, written down, does not stop it), reply with only "${SENTINEL_OK}".`,
+  `If the work cannot go on at all (a merge conflict, a missing dependency or credential — never just a red test), reply with only "${SENTINEL_BAD} <one-line reason>".`,
   `If you need an answer from a person, restate the question briefly and end with a line "${SENTINEL_ASK}".`,
   'Do not do any more work in this reply.',
 ].join(' ')

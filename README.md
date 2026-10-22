@@ -102,8 +102,8 @@ line of its own:
 
 | Line | Means |
 |---|---|
-| `PLAN_QUEUE: DONE` | landed, and its gate passed — the task is done |
-| `PLAN_QUEUE: BLOCKED <reason>` | it could not finish — the queue halts with the reason on the task |
+| `PLAN_QUEUE: DONE` | its work landed — the task is done (a test it believes wrong is written down, not a reason to stop) |
+| `PLAN_QUEUE: BLOCKED <reason>` | the work cannot go on at all (merge conflict, missing dependency or credential), never just a red test — the queue halts with the reason on the task |
 | `PLAN_QUEUE: QUESTION` | the message above it is a question for you — [the task waits](#when-a-task-asks-you-something) |
 
 A sentinel only counts on a line of its own (bold or backticks are fine), and

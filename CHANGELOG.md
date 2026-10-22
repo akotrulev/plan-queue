@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+
+- **A red test no longer stops a task.** The note every task gets now says a red
+  test means the code is wrong and is fixed in the code; a test the task believes
+  is wrong is written down and the task still ends `PLAN_QUEUE: DONE`.
+  `PLAN_QUEUE: BLOCKED` is for work that cannot go on at all — a merge conflict,
+  a missing dependency or credential.
+
 ## 0.3.1
 
 - **A plan that moves itself still merges.** A task may move or rename its own
