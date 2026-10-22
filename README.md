@@ -248,6 +248,8 @@ builds on the one before.
   was cut from with `--no-ff`, and the worktree and branch are removed. The
   merge happens in the main checkout, which has to still be on that branch;
   merges from plans finishing together are serialized.
+- A task may move or rename its own plan in the worktree (filing it under
+  `implemented/`, say); the queue follows it there and still merges.
 - A conflict (or the checkout having moved) aborts the merge and keeps the
   branch and worktree. Resolve it and run the plan again: with nothing left to
   run it retries the merge. `planQueue.mergeWhenDone` off leaves the branch for

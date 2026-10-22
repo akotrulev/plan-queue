@@ -7,6 +7,7 @@ import {
   currentBranch,
   ensureWorktree,
   isDirty,
+  locatePlan,
   mergeBranch,
   removeWorktree,
   repoRoot,
@@ -326,7 +327,7 @@ export class Queue implements vscode.Disposable {
     const st = this.state.get(planPath, taskId).status
     if (st === 'done' || st === 'skipped') return { ok: false, reason: `${taskId} is already ${st}` }
 
-    const plan = await readPlan(run.wt?.planPath ?? planPath, planPath)
+    const plan = await readPlan(await this.livePlan(run), planPath)
     const ordered = this.state.ordered(plan)
     const ready = readyTasks({
       ordered,
@@ -422,6 +423,7 @@ export class Queue implements vscode.Disposable {
       await this.loop(run, opts)
       if (run.wt && !run.stopRequested) await this.mergeIfDone(run, run.wt)
     } catch (e) {
+      run.out.appendLine(`\n=== ${title} failed: ${e instanceof Error ? e.message : e}`)
       void vscode.window.showErrorMessage(
         `Plan Queue — ${title} failed: ${e instanceof Error ? e.message : e}`,
       )
@@ -449,13 +451,13 @@ export class Queue implements vscode.Disposable {
       // Tasks started by hand skip the dependency check and the cap.
       while (run.forced.length && !run.stopRequested) {
         const id = run.forced.shift()!
-        const task = this.state.ordered(await readPlan(run.wt?.planPath ?? planPath, planPath)).find((t) => t.id === id)
+        const task = this.state.ordered(await readPlan(await this.livePlan(run), planPath)).find((t) => t.id === id)
         if (task && !run.live.has(id)) this.launch(run, task)
       }
 
       if (!run.stopRequested && !run.halted) {
         // Re-read, every pass. This is the point of the whole design.
-        const plan = await readPlan(run.wt?.planPath ?? planPath, planPath)
+        const plan = await readPlan(await this.livePlan(run), planPath)
         const ordered = this.state.ordered(plan)
         const cfg = readConfig()
         run.parallel = run.parallel || (cfg.maxParallelTasks > 1 && ordered.some((t) => t.deps !== undefined))
@@ -887,9 +889,27 @@ export class Queue implements vscode.Disposable {
   }
 
   /** Merge the plan's branch back once nothing in the plan is left to run. */
+  /**
+   * The plan file the run reads now. In a worktree a task may have moved it —
+   * a close-out filing it under `implemented/` — so it is looked for, and a new
+   * place is recorded, so the tree, the merge and a resume all follow it.
+   */
+  private async livePlan(run: Run): Promise<string> {
+    const wt = run.wt
+    if (!wt) return run.planPath
+    const found = await locatePlan(wt.dir, wt.base, path.relative(wt.dir, wt.planPath))
+    if (!found) throw new Error(`the plan is no longer in its worktree: ${wt.planPath} was deleted, not moved`)
+    if (found !== wt.planPath) {
+      run.out.appendLine(`  the plan moved to ${path.relative(wt.dir, found)}`)
+      wt.planPath = found
+      await this.state.setWorktree(run.planPath, wt)
+    }
+    return found
+  }
+
   private async mergeIfDone(run: Run, wt: PlanWorktree): Promise<void> {
     const { planPath, out, title } = run
-    const plan = await readPlan(wt.planPath, planPath)
+    const plan = await readPlan(await this.livePlan(run), planPath)
     const left = plan.tasks.filter((t) => {
       const s = this.state.get(planPath, t.id).status
       return s !== 'done' && s !== 'skipped'
