@@ -2,7 +2,7 @@
   "name": "plan-queue",
   "displayName": "Plan Queue",
   "description": "Track and run a plan's per-task prompts through Claude Code, one fresh context window per task.",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "publisher": "akotrulev",
   "license": "MIT",
   "icon": "media/icon.png",
