@@ -50,6 +50,24 @@ test('a failed task is not tried again in the same run', () => {
   assert.deepEqual(ready([t('T1')], { T1: 'blocked' }, { attempted: ['T1'] }), [])
 })
 
+test('a dependency whose prompt was deleted once it landed counts as done', () => {
+  // C1 landed and its prompt went; Q2 depended only on C1 and must not wait for Q1 beside it.
+  const plan = [t('Q1', ['C1']), t('Q2', ['C1'])]
+  assert.deepEqual(ready(plan, { Q1: 'running' }, { attempted: ['Q1'], live: ['Q1'] }), ['Q2'])
+})
+
+test('a landed dependency does not make a task wait for everything before it', () => {
+  // Q1 landed and went; B1 depends on Q1 only, so Q2 still running above it does not hold it back.
+  const plan = [t('Q2', ['C1']), t('B1', ['Q1']), t('F1', ['Q2'])]
+  assert.deepEqual(ready(plan, { Q2: 'running' }, { attempted: ['Q2'], live: ['Q2'] }), ['B1'])
+})
+
+test('a landed dependency beside a present one still waits for the present one', () => {
+  const plan = [t('B1'), t('F2', ['F1', 'B1'])]
+  assert.deepEqual(ready(plan), ['B1'])
+  assert.deepEqual(ready(plan, { B1: 'done' }), ['F2'])
+})
+
 test('a dependency the plan does not have is ignored, and a prose-only line falls back to order', () => {
   const plan = [t('T1'), t('T2', ['the', 'schema'])]
   assert.deepEqual(ready(plan), ['T1'])

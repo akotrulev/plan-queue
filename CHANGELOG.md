@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1
+
+- **A landed dependency no longer turns a task back into a plain queue.** A
+  plan deletes a task's prompt once its work is committed, so its id leaves the
+  plan. A task whose `Depends on:` named only such ids used to fall back to
+  waiting for every task above it (Q2 waited for Q1 once C1 had landed). An id
+  the plan no longer has now counts as done; a line naming only prose still
+  falls back to order.
+
 ## 0.4.0
 
 - **Pause and resume.** *Pause* (on a running task, on a plan, or in the view

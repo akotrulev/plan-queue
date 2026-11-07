@@ -16,10 +16,16 @@ export interface ScheduleInput {
 
 const settled = (status: string) => status === 'done' || status === 'skipped'
 
+/** The shape of a task id (`C1`, `F13`, `A3b`), as against a prose word in a `Depends on:` line. */
+const TASK_ID = /^[A-Za-z]{1,4}\d+[a-z]?$/
+
 /**
  * What can start now. A task with a `Depends on:` line waits for exactly those
  * tasks to be done; one without waits for every task before it, which is the
- * sequential queue it always was. Such an implicit wait is also released by a
+ * sequential queue it always was. A named task the plan no longer has counts as
+ * done: a plan deletes a task's prompt once its work has landed, so the id is
+ * gone exactly when the dependency is met. A line naming only prose still falls
+ * back to order. Such an implicit wait is also released by a
  * task that was attempted and failed, so that with `stopOnFailure` off the
  * queue still carries on past it. A declared dependency never is. A paused
  * task releases nothing: it is unfinished work, not a failure.
@@ -42,7 +48,9 @@ export function readyTasks(input: ScheduleInput): Task[] {
     if (settled(st)) return
 
     const declared = task.deps?.filter((d) => d !== task.id && index.has(d))
-    const explicit = declared !== undefined && (declared.length > 0 || task.deps!.length === 0)
+    const landed = task.deps?.some((d) => !index.has(d) && TASK_ID.test(d)) ?? false
+    const explicit =
+      declared !== undefined && (declared.length > 0 || landed || task.deps!.length === 0)
 
     const unmet = explicit
       ? declared!.some((d) => (index.get(d)! >= from ? !settled(status(d)) : false))
