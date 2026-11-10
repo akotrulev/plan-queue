@@ -14,7 +14,8 @@ import {
   slugFor,
   stashAll,
 } from './git'
-import { readPlan, type Task } from './plan'
+import { looksLikeAPlan, parsePlanText, readPlan, type Task } from './plan'
+import { successors, type PlanFacts } from './chain'
 import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
 import { readyTasks, unknownDeps } from './schedule'
 import { gateFixPrompt } from './describe'
@@ -467,6 +468,7 @@ export class Queue implements vscode.Disposable {
     await this.changed()
     run.out.show(true)
 
+    let merged = false
     try {
       const prepared = await this.prepareWorktree(run, folder)
       if (prepared === 'cancelled') return
@@ -483,7 +485,7 @@ export class Queue implements vscode.Disposable {
       run.cwd = prepared?.cwd ?? folder
 
       await this.loop(run, opts)
-      if (run.wt && !run.stopRequested) await this.mergeIfDone(run, run.wt)
+      if (run.wt && !run.stopRequested) merged = await this.mergeIfDone(run, run.wt)
     } catch (e) {
       run.out.appendLine(`\n=== ${title} failed: ${e instanceof Error ? e.message : e}`)
       void vscode.window.showErrorMessage(
@@ -499,6 +501,60 @@ export class Queue implements vscode.Disposable {
         )
       } else if (run.ran && !run.stopRequested) {
         void vscode.window.showInformationMessage(`Plan Queue — ${title}: finished ${run.ran} task(s).`)
+      }
+    }
+    // After the finally, so this plan no longer counts as running.
+    if (merged) await this.startSuccessors(run).catch((e) => {
+      run.out.appendLine(`  could not start the plans that run after it: ${e instanceof Error ? e.message : e}`)
+    })
+  }
+
+  /**
+   * Start every plan whose `Runs after:` names the plan that just merged, once
+   * all the plans it names are finished. Each is cut from the base branch, which
+   * now holds the merge.
+   */
+  private async startSuccessors(run: Run): Promise<void> {
+    const c = vscode.workspace.getConfiguration('planQueue')
+    if (!c.get<boolean>('startPlansAfterMerge', true)) return
+    const glob = c.get<string>('planGlob', 'docs/plans/**/*.md')
+    const uris = await vscode.workspace.findFiles(glob, '**/node_modules/**', 2000)
+    const facts: PlanFacts[] = []
+    for (const uri of uris) {
+      try {
+        const text = await fs.promises.readFile(uri.fsPath, 'utf8')
+        if (!looksLikeAPlan(text)) continue
+        const live = this.state.livePlanPath(uri.fsPath)
+        const plan =
+          live === uri.fsPath
+            ? parsePlanText(text, uri.fsPath)
+            : await readPlan(live, uri.fsPath).catch(() => parsePlanText(text, uri.fsPath))
+        facts.push({
+          path: uri.fsPath,
+          runsAfter: plan.runsAfter,
+          left: plan.tasks.filter((t) => {
+            const st = this.state.get(uri.fsPath, t.id).status
+            return st !== 'done' && st !== 'skipped'
+          }).length,
+          running: this.runs.has(uri.fsPath),
+          hasWorktree: !!this.state.worktree(uri.fsPath),
+        })
+      } catch {
+        // A plan we cannot read cannot be started either.
+      }
+    }
+    for (const next of successors(run.planPath, facts)) {
+      const name = path.basename(next.path)
+      if (!next.start) {
+        run.out.appendLine(`=== ${name} runs after ${run.title} but does not start: ${next.reason}`)
+        continue
+      }
+      const started = this.start(next.path)
+      if (started.ok) {
+        run.out.appendLine(`=== starting ${name}, which runs after ${run.title}`)
+        void vscode.window.showInformationMessage(`Plan Queue — starting ${name}, which runs after ${run.title}.`)
+      } else {
+        run.out.appendLine(`=== ${name} runs after ${run.title} but did not start: ${started.reason}`)
       }
     }
   }
@@ -1032,7 +1088,8 @@ export class Queue implements vscode.Disposable {
     return found
   }
 
-  private async mergeIfDone(run: Run, wt: PlanWorktree): Promise<void> {
+  /** True when the plan's branch was merged into its base. */
+  private async mergeIfDone(run: Run, wt: PlanWorktree): Promise<boolean> {
     const { planPath, out, title } = run
     const plan = await readPlan(await this.livePlan(run), planPath)
     const left = plan.tasks.filter((t) => {
@@ -1041,11 +1098,11 @@ export class Queue implements vscode.Disposable {
     })
     if (left.length) {
       out.appendLine(`=== ${title}: ${left.length} task(s) left; ${wt.branch} stays unmerged`)
-      return
+      return false
     }
     if (!vscode.workspace.getConfiguration('planQueue').get<boolean>('mergeWhenDone', true)) {
       out.appendLine(`=== ${title}: done; ${wt.branch} is ready to merge into ${wt.base}`)
-      return
+      return false
     }
 
     await commitAll(wt.dir, `plan-queue: ${title} — remaining changes`)
@@ -1060,7 +1117,7 @@ export class Queue implements vscode.Disposable {
           'Show log',
         )
         .then((pick) => pick && out.show())
-      return
+      return false
     }
 
     out.appendLine(`  merged into ${wt.base}`)
@@ -1068,6 +1125,7 @@ export class Queue implements vscode.Disposable {
     if (!removed) out.appendLine(`  could not remove ${wt.dir}; delete it by hand`)
     await this.state.setWorktree(planPath, undefined)
     void vscode.window.showInformationMessage(`Plan Queue — ${title} merged into ${wt.base}.`)
+    return true
   }
 
   /** Throw away a plan's worktree and its unmerged branch. */

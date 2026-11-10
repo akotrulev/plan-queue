@@ -102,7 +102,7 @@ export class PlanTree
     const paused = tasks.filter((t) => this.state.get(plan.path, t.id).status === 'paused').map((t) => t.id)
     item.description =
       `${done}/${tasks.length}${paused.length ? ` · paused ${paused.join(', ')}` : ''}` +
-      `${wt ? ` · ${wt.branch}` : ''}${dup}`
+      `${wt ? ` · ${wt.branch}` : ''}${plan.runsAfter?.length ? ` · after ${plan.runsAfter.join(', ')}` : ''}${dup}`
     // plan[.live][.wt] — the menus key on both.
     item.contextValue = `plan${live ? '.live' : ''}${wt ? '.wt' : ''}`
     item.iconPath = new vscode.ThemeIcon(

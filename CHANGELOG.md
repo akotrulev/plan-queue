@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- **One plan after another.** A plan with a `**Runs after:** 156` line above
+  its prompts starts by itself once plan 156's branch has merged, cut from the
+  branch that now holds it. Several names wait for the last of them. A plan
+  already running, with nothing left, or with a worktree of its own is left
+  alone, and the log says why. The tree shows `after 156`. Off with
+  `planQueue.startPlansAfterMerge`.
+
 ## 0.4.1
 
 - **A landed dependency no longer turns a task back into a plain queue.** A

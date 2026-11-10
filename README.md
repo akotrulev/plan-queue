@@ -291,6 +291,35 @@ builds on the one before.
 With worktrees off, or outside a git repository, a plan runs in the workspace
 itself and only one such plan runs at a time.
 
+### One plan after another
+
+A plan that must wait for another says so above its prompts:
+
+```markdown
+# 157 — Adviser cost on Sonnet
+
+**Runs after:** 156
+```
+
+When plan 156's branch merges, every plan whose `Runs after:` names it starts
+by itself, cut from the branch that now holds 156. A chain is each plan naming
+the one before it: 157 after 156, 158 after 157.
+
+- A name is the plan's file name without `.md`, or its start up to a hyphen:
+  `156` names `156-next-step-and-card-answers.md`; `15` does not.
+- Several names (`156, 157 and 158`) wait for the last of them: the plan starts
+  when the final one merges and the rest have nothing left to run.
+- Only the leading list is read. `159 (the whole plan), which itself runs after
+  156` names 159 alone. The colon is required, so a sentence starting "Runs
+  after the …" is prose.
+- It starts only after a real merge, so it needs `planQueue.worktrees` and
+  `planQueue.mergeWhenDone`. A failed or conflicting merge starts nothing.
+- A plan that is already running, has nothing left, or already has a worktree
+  (cut before the merge, so without it) is not started; the finished plan's log
+  says why. So is one naming a plan that does not exist.
+- Starting a plan by hand ignores the line. The tree shows it as `after 156`.
+- Turn it off with `planQueue.startPlansAfterMerge`.
+
 ## Driving it from Claude Code
 
 Plan Queue can serve a small local endpoint so that something other than the
@@ -388,6 +417,7 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>.plan-queue/` beside the repo |
 | `planQueue.worktreeSetupCommand` | — | Run once in a new worktree, e.g. `npm ci` |
 | `planQueue.mergeWhenDone` | `true` | Merge the branch back when the plan is done |
+| `planQueue.startPlansAfterMerge` | `true` | Start the plans whose `Runs after:` names a plan that just merged |
 | `planQueue.maxParallelTasks` | `3` | Tasks of one plan working at once; only `Depends on:` tasks ever overlap |
 | `planQueue.server.enabled` | `false` | Serve the local MCP / `pq` endpoint |
 | `planQueue.server.port` | `47321` | Its port |

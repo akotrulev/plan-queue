@@ -28,6 +28,12 @@ export interface Plan {
   tasks: Task[]
   /** Ids used by more than one heading. Only the first is a task; status and order key on the id. */
   duplicates: string[]
+  /**
+   * Plans named by a `Runs after:` line outside the prompts, e.g. `156` or
+   * `156-next-step`. When the last of them merges, this plan starts by itself.
+   * Undefined when the plan has no such line.
+   */
+  runsAfter?: string[]
 }
 
 const PROMPTS_HEADING = /^##\s+Prompts\b/i
@@ -36,6 +42,34 @@ const ANY_H2 = /^##\s/
 
 const DEPENDS_ON = /^\s*(?:[-*]\s+)?\**\s*depends\s+on\s*:?\s*\**\s*:?\s*(.+?)\s*$/im
 const NOTHING = /^(none|nothing|nil|n\/a|-|—|–)$/i
+// The colon is required, so a sentence that starts "Runs after the …" is prose.
+const RUNS_AFTER = /^\s*(?:[-*]\s+)?\**\s*runs\s+after\s*(?:\**\s*:|:\s*\**)\s*(.+?)\s*$/i
+
+/**
+ * The plans on a `Runs after:` line. Only the leading list counts: names
+ * separated by commas, `&` or `and`, each a single word (a leading "plan" is
+ * dropped). The first part that is a phrase ends the list, so
+ * `159 (the whole plan), which itself runs after 156` names 159 alone.
+ */
+export function parseRunsAfter(line: string): string[] | undefined {
+  const m = line.match(RUNS_AFTER)
+  if (!m) return undefined
+  // A full stop ends the list: "156. Plan Queue starts this …" names 156.
+  const text = m[1]
+    .split(/\.(?:\s|$)/)[0]
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/[`*_\[\]]/g, ' ')
+  const refs: string[] = []
+  for (const part of text.split(/\s*(?:[,;&]|\band\b)\s*/i)) {
+    const words = part.trim().replace(/[.:]+$/, '').split(/\s+/).filter(Boolean)
+    if (!words.length) continue
+    if (words.length > 1 && /^plans?$/i.test(words[0])) words.shift()
+    if (words.length !== 1) break
+    if (NOTHING.test(words[0])) break
+    refs.push(words[0])
+  }
+  return refs
+}
 
 /** The ids on a `Depends on:` line, or undefined when the prompt has none. */
 export function parseDeps(prompt: string): string[] | undefined {
@@ -121,6 +155,7 @@ export function parsePlanText(text: string, path: string): Plan {
   let fence: { ch: string; len: number } | null = null
   let current: { id: string; title: string; agent: string; line: number } | null = null
   let buffer: string[] = []
+  let runsAfter: string[] | undefined
 
   const flush = () => {
     const head = current
@@ -161,7 +196,10 @@ export function parsePlanText(text: string, path: string): Plan {
       inPrompts = PROMPTS_HEADING.test(line)
       continue
     }
-    if (!inPrompts) continue
+    if (!inPrompts) {
+      if (!runsAfter) runsAfter = parseRunsAfter(line)
+      continue
+    }
 
     const heading = line.match(TASK_HEADING)
     if (heading) {
@@ -175,7 +213,7 @@ export function parsePlanText(text: string, path: string): Plan {
   }
   flush()
 
-  return { path, title, tasks, duplicates }
+  return { path, title, tasks, duplicates, ...(runsAfter ? { runsAfter } : {}) }
 }
 
 /**
