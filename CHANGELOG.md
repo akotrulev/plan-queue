@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- **A quoted `Depends on:` line inside a fenced prompt is read.** A prompt
+  written as a fenced code block keeps its first line as `> **Depends on:** A1`,
+  and the `>` used to stop the line from matching, so the task silently fell
+  back to waiting for every task above it and the plan ran one task at a time.
+  Leading `>` markers are now skipped on `Depends on:` and `Runs after:` lines.
+
 ## 0.5.0
 
 - **One plan after another.** A plan with a `**Runs after:** 156` line above

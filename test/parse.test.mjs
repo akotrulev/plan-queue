@@ -87,6 +87,14 @@ test('reads a Depends on line, in the shapes plans write it', () => {
   assert.deepEqual(dep('Depends on: —'), [])
 })
 
+test('reads a Depends on line kept as a quote inside a fenced prompt', () => {
+  const p = parsePlanText(
+    '## Prompts\n\n### A1 — a\n\n> go\n\n### A7 — b\n\n````\n> **Depends on:** A1\nAgent: x\n\nDo it.\n````\n',
+    '/x/p.md',
+  )
+  assert.deepEqual(p.tasks[1].deps, ['A1'])
+})
+
 test('a task with no Depends on line has no deps, which is not the same as none', () => {
   const [t] = parsePlanText('## Prompts\n\n### T1 — x\n\n> Do it, and it depends on the schema being there.\n', '/x/p.md').tasks
   assert.equal(t.deps, undefined)

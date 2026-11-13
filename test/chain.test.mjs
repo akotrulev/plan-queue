@@ -14,6 +14,7 @@ test('a ref names a plan by its whole name or its number', () => {
 
 test('Runs after: reads the leading list and stops at prose', () => {
   assert.deepEqual(parseRunsAfter('**Runs after:** 156'), ['156'])
+  assert.deepEqual(parseRunsAfter('> **Runs after:** 156'), ['156'])
   assert.deepEqual(parseRunsAfter('**Runs after**: 156, 157 and 158.'), ['156', '157', '158'])
   assert.deepEqual(parseRunsAfter('- Runs after: plan 156 & `157-cost`'), ['156', '157-cost'])
   assert.deepEqual(parseRunsAfter('Runs after: [156](156-next-step.md)'), ['156'])

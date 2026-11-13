@@ -40,10 +40,11 @@ const PROMPTS_HEADING = /^##\s+Prompts\b/i
 const TASK_HEADING = /^###\s+(.+)$/
 const ANY_H2 = /^##\s/
 
-const DEPENDS_ON = /^\s*(?:[-*]\s+)?\**\s*depends\s+on\s*:?\s*\**\s*:?\s*(.+?)\s*$/im
+// A leading `>` is allowed: a fenced prompt keeps a quoted `> **Depends on:**` line as written.
+const DEPENDS_ON = /^\s*(?:>\s*)*(?:[-*]\s+)?\**\s*depends\s+on\s*:?\s*\**\s*:?\s*(.+?)\s*$/im
 const NOTHING = /^(none|nothing|nil|n\/a|-|—|–)$/i
 // The colon is required, so a sentence that starts "Runs after the …" is prose.
-const RUNS_AFTER = /^\s*(?:[-*]\s+)?\**\s*runs\s+after\s*(?:\**\s*:|:\s*\**)\s*(.+?)\s*$/i
+const RUNS_AFTER = /^\s*(?:>\s*)*(?:[-*]\s+)?\**\s*runs\s+after\s*(?:\**\s*:|:\s*\**)\s*(.+?)\s*$/i
 
 /**
  * The plans on a `Runs after:` line. Only the leading list counts: names
