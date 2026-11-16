@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - **The usage limit is a pause, not a failure.** When Claude Code hits the
   5-hour or weekly limit, the task is paused with its session and changes kept,
