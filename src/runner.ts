@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import * as vscode from 'vscode'
 import type { Task } from './plan'
 
+import { isTransient, limitFromText, parseRateLimitEvent, type LimitInfo } from './limits'
 import { allowRuleFor, Tail, toolSummary } from './describe'
 import { SENTINEL_ASK, SENTINEL_BAD, SENTINEL_OK, verdict } from './verdict'
 
@@ -71,6 +72,13 @@ export interface RunResult {
   silent?: boolean
   /** The agent's final message when it is waiting — the question, in context. */
   question?: string
+  /**
+   * The turn failed on the account's usage limit: a `rejected` rate-limit event
+   * came in, or the failure text says so. Not an ordinary failure.
+   */
+  limited?: LimitInfo
+  /** The turn failed on a temporary API error (overloaded, 5xx, a dropped connection) and is worth retrying. */
+  transient?: boolean
   /** Allowlist entries that would have let through the calls this turn was denied. */
   denied: string[]
 }
@@ -94,6 +102,8 @@ export interface TaskRunOptions {
    * window that closes mid-task still knows which session to resume.
    */
   onSession?: (sessionId: string) => void
+  /** Called for every rate-limit event the CLI sends, warnings included. */
+  onRateLimit?: (info: LimitInfo) => void
 }
 
 export interface RunConfig {
@@ -277,6 +287,11 @@ export function runTask(
     let sessionId: string | undefined
     let stderr = ''
     let subtype: string | undefined
+    let isError = false
+    // The last `rejected` rate-limit event of this turn, until an `allowed` one lifts it.
+    let rejected: LimitInfo | undefined
+    // Text of an assistant message the CLI flagged as an API error.
+    let errorText = ''
     const denied: string[] = []
 
     const write = (s: string) => {
@@ -312,10 +327,23 @@ export function runTask(
         sessionId = msg.session_id
         opts.onSession?.(msg.session_id)
       }
+      if (msg.type === 'rate_limit_event') {
+        const info = parseRateLimitEvent(msg)
+        if (info) {
+          if (info.status === 'rejected') rejected = info
+          else if (info.status === 'allowed' && (!rejected?.type || !info.type || rejected.type === info.type)) rejected = undefined
+          opts.onRateLimit?.(info)
+        }
+        return
+      }
       if (msg.type === 'stream_event' && msg.event?.type === 'content_block_delta') {
         const d = msg.event.delta
         write(d?.text ?? (cfg.logThinking ? d?.thinking : undefined) ?? '')
       } else if (msg.type === 'assistant') {
+        // Only the latest assistant message counts: an error the CLI recovered from is forgotten.
+        if (msg.error || msg.isApiErrorMessage) {
+          errorText = resultText(msg.message?.content) || (typeof msg.error === 'string' ? msg.error : '')
+        } else errorText = ''
         for (const block of msg.message?.content ?? []) {
           if (block.type === 'tool_use') {
             flush()
@@ -339,6 +367,7 @@ export function runTask(
         flush()
         finalText = typeof msg.result === 'string' ? msg.result : finalText
         subtype = typeof msg.subtype === 'string' ? msg.subtype : undefined
+        isError = msg.is_error === true
         child?.stdin?.end()
         if (typeof msg.total_cost_usd === 'number') costUsd = msg.total_cost_usd
         if (msg.session_id) sessionId = msg.session_id
@@ -381,10 +410,28 @@ export function runTask(
       out.appendLine(`\n--- ${task.id} paused${sessionId ? '; resuming it picks up this session' : ''}`)
       return { ok: false, paused: true, durationMs, reason: 'paused', costUsd, sessionId, denied }
     }
+    // Out of turns or budget has its own reason; a stale rejection or a passing mention of a limit does not change it.
+    const cutShort = subtype !== undefined && subtype !== 'success' && subtype !== 'error_during_execution'
+    // What the turn ended on: the result's text, or the last API error when it carries none.
+    const endText = finalText.trim() ? finalText : errorText
+    const failed = code !== 0 || isError || (subtype !== undefined && subtype !== 'success')
+    if (failed && !cutShort) {
+      const what = [stderr, endText].filter((t) => t.trim()).join('\n')
+      const limited = rejected ?? limitFromText(what, Date.now())
+      if (limited) {
+        out.appendLine(`\n--- ${task.id} hit the usage limit${limited.type ? ` (${limited.type})` : ''}`)
+        return { ok: false, limited, reason: 'usage limit', durationMs, costUsd, sessionId, denied }
+      }
+    }
     if (code !== 0) {
-      const reason = stderr.trim().split('\n').slice(-3).join(' ') || `claude exited ${code}`
+      const reason = stderr.trim().split('\n').slice(-3).join(' ') || finalText.trim().split('\n').slice(-3).join(' ') || `claude exited ${code}`
       out.appendLine(`\n--- ${task.id} FAILED: ${reason}`)
-      return { ok: false, reason, durationMs, costUsd, sessionId, denied }
+      return { ok: false, reason, transient: !cutShort && isTransient(`${stderr}\n${endText}`), durationMs, costUsd, sessionId, denied }
+    }
+    if (isError && !cutShort) {
+      const reason = (finalText.trim() || errorText.trim() || subtype || 'the CLI reported an error').split('\n').slice(-3).join(' ')
+      out.appendLine(`\n--- ${task.id} FAILED: ${reason}`)
+      return { ok: false, reason, transient: isTransient(endText), durationMs, costUsd, sessionId, denied }
     }
 
     const v = verdict({ finalText, subtype, sessionId, requireSentinel: cfg.requireSentinel })

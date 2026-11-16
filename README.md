@@ -113,7 +113,9 @@ line of its own:
 A sentinel only counts on a line of its own (bold or backticks are fine), and
 the last one wins, so a message that merely mentions `PLAN_QUEUE: DONE` is not
 taken for it. Running out of turns or budget, or a non-zero exit, also halt the
-queue.
+queue. Two failures do not: a [usage limit](#when-the-usage-limit-is-hit) pauses
+the task, and a [temporary API error](#when-the-usage-limit-is-hit) is retried
+first.
 
 A turn that ends with **no** sentinel — usually a task that finished and forgot
 the line — is not left hanging: the queue resumes the session once and asks it
@@ -212,10 +214,56 @@ in the tree, and its plan shows `paused T3`.
 - **Closing the window pauses.** The session id is saved the moment a task's
   session starts, so a task cut off by VS Code closing — or crashing — is
   `paused` when the window opens again, not `pending`. Run or resume the plan
-  to pick it up. Nothing is resumed automatically.
+  to pick it up. Nothing is resumed automatically unless you turn on
+  `planQueue.resumeOnOpen`: then every plan with a task the window closing
+  paused starts again a few seconds after the window opens, and those tasks
+  resume their sessions. Tasks you paused by hand stay paused.
 - A paused task's changes stay in the worktree, and are not stashed if another
   task fails. A task that passes beside it is committed with them in it.
 - A task waiting for your reply is not paused; it stays waiting.
+
+### When the usage limit is hit
+
+When Claude Code reaches your account's 5-hour or weekly limit, the queue does
+not fail the task. It pauses it, and carries on by itself once the limit resets.
+
+- The task goes to `paused` with `usage limit (five_hour) · resumes 03:02`. Its
+  session and its changes are kept, nothing is stashed, and the plan is not
+  halted. No error is shown.
+- The reset time comes from the CLI's rate-limit message, or from the text it
+  printed (`resets 3am`, `resets 15:30`, `resets Nov 21, 10am (Europe/Sofia)`;
+  the zone in parentheses is honoured, local time is used without one). If there
+  is no time, the queue waits 30 minutes for a 5-hour limit and 6 hours for a
+  weekly one, and looks again.
+- The limit belongs to the account, so it is shared. While it is on, no plan
+  starts a new task until the reset plus `planQueue.limitResumeDelaySeconds`
+  (120), and the status bar shows `usage limit until 03:02`. Tasks you start by
+  hand with *Run now* still go.
+- Running or resuming a plan during the limit does not start it. It says when
+  it will, and starts then.
+- After that, every plan with a limit-paused task, or one you tried to start, is
+  taken up again. Only the paused tasks resume, in their own sessions, plus
+  whatever is ready; a `blocked` or `failed` task is not run again, and if one
+  stopped the plan, nothing else starts. Plans already running are woken to
+  start what the limit held back. If the limit comes back, tasks pause again.
+  The same happens when a window is opened after the reset. A plan that is
+  mid-stop, or a task still pausing, is tried once more a few seconds later;
+  otherwise the reason is written to the plan's log.
+- **Stop** and **Pause** drop all of this for the plan, even when they land
+  just as the limit cuts the turn off: its limit-paused tasks become ordinary
+  paused tasks, it is not started at the reset, and only you resume them.
+  Pausing one limit-paused task does the same for that task.
+- Turn it off with `planQueue.resumeAfterLimit`. Tasks still pause, and nothing
+  new starts while the limit is on, but you resume them yourself.
+- `planQueue.limitStartThreshold` (percent, default 0 = off) stops new tasks
+  from starting once a window is that full, and waits for its reset. Tasks
+  already running carry on.
+
+A turn cut off by a temporary API error (overloaded, a 5xx, a dropped
+connection; never a 4xx such as a prompt that is too long or a bad key) is
+retried in the same session: after 1 minute, then after 5. Set
+the number of retries with `planQueue.transientRetries` (2). Stop and Pause end
+the wait. Only when the retries are used up does the task fail as usual.
 
 ### Logs
 
@@ -320,6 +368,64 @@ the one before it: 157 after 156, 158 after 157.
 - Starting a plan by hand ignores the line. The tree shows it as `after 156`.
 - Turn it off with `planQueue.startPlansAfterMerge`.
 
+### Running unattended: the backlog
+
+The backlog is an ordered list of plans for Plan Queue to run by itself — for
+the hours you are asleep or away, when your usage windows would otherwise go
+unused. VS Code has to stay open.
+
+- Right-click a plan for **Add to the backlog**, **Remove from the backlog**,
+  **Move up in the backlog** or **Move down in the backlog**. The tree shows
+  `backlog #2` in the plan's description. **Plan Queue: Show the backlog** in
+  the command palette lists it in order.
+- The list is kept per workspace, on this machine, like the rest of the state.
+
+A **sweep** looks at the backlog and starts what it can. It runs when a plan
+finishes, when a [usage limit](#when-the-usage-limit-is-hit) lifts, a few
+seconds after the window opens, and every `planQueue.backlog.sweepMinutes`
+(default 5; 0 turns the interval off). A sweep goes through the backlog in
+order:
+
+- **While a usage limit is on, it does nothing.** The sweep after the reset
+  starts the plans, after the plans the limit paused have been resumed.
+- It starts plans until `planQueue.backlog.maxPlans` (default 1) backlog plans
+  are running. A backlog plan you started by hand counts.
+- It skips a plan that is already running.
+- It skips a plan that has nothing left to run. When every task is done or
+  skipped, the plan is taken off the backlog; with worktrees, only once it has
+  merged (no worktree left).
+- It skips a plan that is **stuck**: a task is `blocked`, `failed`, or
+  `waiting` for a reply, or paused. You are told once for each stuck state, and
+  the log says so too (**Plan Queue — backlog**). Fix the task and the next
+  sweep takes the plan up again. A task paused by the usage limit is not stuck.
+  A task paused by the window closing is not stuck while `resumeOnOpen` is on.
+  Any other paused task is, because nothing would resume it.
+- It skips a plan whose `Runs after:` names a plan that still has tasks left or
+  is running, or names no plan. See [One plan after another](#one-plan-after-another).
+- It skips a plan whose file has uncommitted changes. Starting it would ask you
+  to commit it and wait, so it says so in the log and in a notice instead.
+- **A plan you stopped is not started again.** Stop, or pausing a plan or a
+  task, keeps that plan out of the sweeps until you start it, resume it, or add
+  it to the backlog again. This is remembered while the window is open; a
+  restart forgets it, and a stopped plan with pending tasks then runs again.
+- The scheduler does not start the same plan twice within 5 minutes, so a plan
+  that fails to get going is not retried in a loop.
+
+Plans start through the same path as **Run queue**, so worktrees, the setup
+command and the gate behave as always. `planQueue.backlog.enabled` turns the
+scheduler off; an empty backlog does nothing anyway.
+
+**Resume on open.** With `planQueue.resumeOnOpen` on (default off), a plan with
+a task that the window closing paused is resumed once, shortly after the window
+opens, with or without the backlog. Tasks paused by hand are left alone. Tasks
+paused by a usage limit are not touched either: the limit timer resumes them,
+and a plan that is already running is never started twice. If the limit is
+still on when the window opens, the plan starts at the reset.
+
+Together: put the plans on the backlog, leave the window open, and each
+usage-limit stop becomes a pause that lifts by itself, followed by the next
+plan in line.
+
 ## Driving it from Claude Code
 
 Plan Queue can serve a small local endpoint so that something other than the
@@ -334,7 +440,7 @@ these tools:
 
 | Tool | Does |
 |---|---|
-| `list_plans` | plans, progress, which tasks are waiting or blocked |
+| `list_plans` | plans, progress, which tasks are waiting or blocked, backlog position |
 | `plan_status` | every task: status, dependencies, cost, the question a waiting task asked |
 | `run_plan` | start a plan (optionally `from_task`); returns at once |
 | `run_task` | run one task; `now` starts it beside a running plan |
@@ -344,6 +450,9 @@ these tools:
 | `stop` | stop one plan or all |
 | `pause` | pause a task, a plan, or all, keeping each session |
 | `resume` | carry on after a pause, in the same session |
+| `backlog_list` | the backlog in order, with progress and what is stuck |
+| `backlog_add` | put a plan on the backlog, at the end or at a position |
+| `backlog_remove` | take a plan off the backlog |
 
 The same calls from a shell, which is also what an LLM with only a Bash tool
 can use:
@@ -358,6 +467,9 @@ pq resume storefront T3
 pq task storefront T5 --now
 pq log storefront 120
 pq log storefront T3             # that task's latest transcript
+pq backlog                       # the backlog, in order
+pq backlog add storefront 1      # first in line; omit the position for the end
+pq backlog remove storefront
 ```
 
 - It listens on `127.0.0.1` only, refuses requests that carry a browser
@@ -408,6 +520,14 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.gateTimeoutMinutes` | `30` | Kill a gate or setup command after this long; 0 is no limit |
 | `planQueue.gateRetries` | `1` | Times a failed gate's output is handed back to the task to fix |
 | `planQueue.stashFailedWork` | `true` | Stash what a task that did not pass left in its worktree |
+| `planQueue.resumeAfterLimit` | `true` | Pause tasks at the usage limit and carry on after the reset |
+| `planQueue.limitResumeDelaySeconds` | `120` | Wait this long after the reset before resuming |
+| `planQueue.limitStartThreshold` | `0` | Percent of a usage window at which no new tasks start; 0 is off |
+| `planQueue.resumeOnOpen` | `false` | When the window opens, resume plans whose tasks the window closing paused |
+| `planQueue.backlog.enabled` | `true` | Start the plans on the backlog by itself |
+| `planQueue.backlog.maxPlans` | `1` | Backlog plans running at once |
+| `planQueue.backlog.sweepMinutes` | `5` | How often the backlog looks for a plan to start; 0 is off |
+| `planQueue.transientRetries` | `2` | Retries (after 1 min, then 5) of a turn cut off by an API error |
 | `planQueue.stopOnFailure` | `true` | Halt the queue on a failed task |
 | `planQueue.requireSentinel` | `true` | Require `PLAN_QUEUE: DONE`; a missing one is asked about once |
 | `planQueue.useAgentFromPlan` | `true` | Honour the heading's agent |

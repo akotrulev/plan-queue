@@ -208,6 +208,36 @@
         "icon": "$(unlock)"
       },
       {
+        "command": "planQueue.backlogAdd",
+        "title": "Add to the backlog",
+        "category": "Plan Queue",
+        "icon": "$(add)"
+      },
+      {
+        "command": "planQueue.backlogRemove",
+        "title": "Remove from the backlog",
+        "category": "Plan Queue",
+        "icon": "$(close)"
+      },
+      {
+        "command": "planQueue.backlogUp",
+        "title": "Move up in the backlog",
+        "category": "Plan Queue",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "planQueue.backlogDown",
+        "title": "Move down in the backlog",
+        "category": "Plan Queue",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "planQueue.showBacklog",
+        "title": "Show the backlog",
+        "category": "Plan Queue",
+        "icon": "$(list-ordered)"
+      },
+      {
         "command": "planQueue.moveUp",
         "title": "Move up",
         "category": "Plan Queue",
@@ -354,13 +384,33 @@
         },
         {
           "command": "planQueue.runQueue",
-          "when": "view == planQueue.tasks && viewItem =~ /^plan(.wt)?$/",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan(.wt)?(.bl)?$/",
           "group": "inline@1"
         },
         {
           "command": "planQueue.restoreOrder",
           "when": "view == planQueue.tasks && viewItem =~ /^plan/",
           "group": "3_order@1"
+        },
+        {
+          "command": "planQueue.backlogAdd",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan/ && viewItem !~ /\\.bl$/",
+          "group": "5_backlog@1"
+        },
+        {
+          "command": "planQueue.backlogRemove",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.*\\.bl$/",
+          "group": "5_backlog@1"
+        },
+        {
+          "command": "planQueue.backlogUp",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.*\\.bl$/",
+          "group": "5_backlog@2"
+        },
+        {
+          "command": "planQueue.backlogDown",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.*\\.bl$/",
+          "group": "5_backlog@3"
         },
         {
           "command": "planQueue.resetPlan",
@@ -379,12 +429,12 @@
         },
         {
           "command": "planQueue.openWorktree",
-          "when": "view == planQueue.tasks && viewItem =~ /^plan.*.wt$/",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan.*\\.wt(\\.bl)?$/",
           "group": "5_worktree@1"
         },
         {
           "command": "planQueue.discardWorktree",
-          "when": "view == planQueue.tasks && viewItem == plan.wt",
+          "when": "view == planQueue.tasks && viewItem =~ /^plan\\.wt(\\.bl)?$/",
           "group": "5_worktree@2"
         },
         {
@@ -434,6 +484,22 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "planQueue.backlogAdd",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.backlogRemove",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.backlogUp",
+          "when": "false"
+        },
+        {
+          "command": "planQueue.backlogDown",
+          "when": "false"
+        },
         {
           "command": "planQueue.moveUp",
           "when": "false"
@@ -615,6 +681,52 @@
           "minimum": 0,
           "description": "When the gate fails after a task said it was done, hand the gate's output back to the same session this many times to fix it before the task counts as blocked. 0 fails at once."
         },
+        "planQueue.resumeAfterLimit": {
+          "type": "boolean",
+          "default": true,
+          "description": "When Claude Code hits the account's usage limit (5-hour or weekly), pause the running tasks instead of failing them, and carry on by itself once the limit resets. A plan started or resumed while the limit is on starts at the reset. Off leaves the paused tasks for you to resume by hand."
+        },
+        "planQueue.limitResumeDelaySeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 0,
+          "description": "How long after the reset time the queue waits before it resumes, so the limit has really lifted."
+        },
+        "planQueue.limitStartThreshold": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Percent of a usage window (5-hour or weekly) at which the queue stops starting new tasks and waits for the reset, instead of running into the limit mid-task. 0 turns it off. Tasks already running carry on."
+        },
+        "planQueue.resumeOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "When the window opens, resume every plan that has a task paused by the window closing, in the same session. Tasks you paused by hand, and tasks paused by the usage limit (the limit timer handles those), are left alone."
+        },
+        "planQueue.backlog.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the plans on the backlog by itself, in order, when a run finishes, a usage limit lifts, the window opens, and every planQueue.backlog.sweepMinutes. An empty backlog does nothing."
+        },
+        "planQueue.backlog.maxPlans": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "description": "How many backlog plans may be running at once. A plan you started by hand counts if it is on the backlog."
+        },
+        "planQueue.backlog.sweepMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "How often the backlog looks for a plan to start, in minutes, besides when a run finishes or a usage limit lifts. 0 turns the interval off."
+        },
+        "planQueue.transientRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "When a task's turn is cut off by a temporary API error (overloaded, 5xx, a dropped connection), wait 1 minute, then 5, and carry on in the same session, this many times before the task counts as blocked. 0 fails at once."
+        },
         "planQueue.stopOnFailure": {
           "type": "boolean",
           "default": true,
@@ -701,8 +813,8 @@
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
     "release": "node scripts/release.mjs",
-    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs test/describe.test.mjs test/chain.test.mjs",
-    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts src/describe.ts src/chain.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
+    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs test/describe.test.mjs test/chain.test.mjs test/limits.test.mjs test/backlog.test.mjs",
+    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts src/describe.ts src/chain.ts src/limits.ts src/backlog.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
     "publish": "npx --yes @vscode/vsce publish --no-dependencies",
     "publish:ovsx": "npx --yes ovsx publish plan-queue.vsix"
   },

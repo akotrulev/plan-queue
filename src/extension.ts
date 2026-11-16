@@ -2,6 +2,7 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import * as vscode from 'vscode'
+import { BacklogRunner } from './sweeper'
 import { readPlan } from './plan'
 import { allowTools, Queue } from './queue'
 import { composePrompt, readConfig } from './runner'
@@ -32,8 +33,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   )
   tree.isRunning = (planPath) => queue.isRunning(planPath)
 
+  const backlogLog = vscode.window.createOutputChannel('Plan Queue — backlog')
+  const backlog = new BacklogRunner(state, queue, tree, backlogLog)
+  tree.backlogPosition = (planPath) => backlog.position(planPath)
+
   const serverLog = vscode.window.createOutputChannel('Plan Queue — control')
-  const server = new ControlServer(context, queue, tree, state, serverLog)
+  const server = new ControlServer(context, queue, tree, state, serverLog, backlog)
   const serverEnabled = () => vscode.workspace.getConfiguration('planQueue').get<boolean>('server.enabled', false)
   if (serverEnabled()) {
     void server.start().then(() => installCli(context, serverLog))
@@ -140,6 +145,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     queue,
+    backlog,
+    backlogLog,
     server,
     serverLog,
     status,
@@ -424,6 +431,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!path) return
       await state.restoreOrder(path)
       tree.refresh()
+    }),
+
+    vscode.commands.registerCommand('planQueue.backlogAdd', async (node?: Node) => {
+      const p = await resolvePlanPath(node)
+      if (!p) return
+      const at = await backlog.add(p)
+      void vscode.window.showInformationMessage(`Plan Queue — ${node?.plan.title ?? path.basename(p)} is #${at} on the backlog.`)
+    }),
+
+    vscode.commands.registerCommand('planQueue.backlogRemove', async (node?: Node) => {
+      if (node) await backlog.remove(node.plan.path)
+    }),
+
+    vscode.commands.registerCommand('planQueue.backlogUp', async (node?: Node) => {
+      if (node) await backlog.move(node.plan.path, -1)
+    }),
+
+    vscode.commands.registerCommand('planQueue.backlogDown', async (node?: Node) => {
+      if (node) await backlog.move(node.plan.path, 1)
+    }),
+
+    vscode.commands.registerCommand('planQueue.showBacklog', async () => {
+      const list = backlog.list()
+      if (!list.length) {
+        void vscode.window.showInformationMessage('Plan Queue — the backlog is empty. Right-click a plan and choose Add to the backlog.')
+        return
+      }
+      if (!tree.loaded.length) await tree.getChildren()
+      const items = list.map((p, i) => {
+        const plan = tree.findPlan(p)
+        return {
+          label: `#${i + 1}  ${plan?.title ?? path.basename(p)}`,
+          description: queue.isRunning(p) ? 'running' : plan ? '' : 'not found',
+          detail: vscode.workspace.asRelativePath(p),
+          path: p,
+        }
+      })
+      const pick = await vscode.window.showQuickPick(items, { title: 'Plan Queue — backlog, in the order it runs', placeHolder: 'Open a plan' })
+      if (pick) await vscode.window.showTextDocument(vscode.Uri.file(state.livePlanPath(pick.path)), { preview: true }).then(undefined, () => undefined)
     }),
 
     vscode.commands.registerCommand('planQueue.moveUp', (node?: Node) => reorder(node, -1)),

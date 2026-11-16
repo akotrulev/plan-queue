@@ -30,6 +30,8 @@ const ICONS: Record<Status, { icon: string; color?: string }> = {
   skipped: { icon: 'circle-slash', color: 'disabledForeground' },
 }
 
+const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
 /** The end of a long message, where the question is. */
 function tail(text: string, max: number): string {
   return text.length > max ? '…' + text.slice(-max) : text
@@ -49,6 +51,9 @@ export class PlanTree
 
   /** Set by the queue once it exists; tells a plan being run from one at rest. */
   isRunning: (planPath: string) => boolean = () => false
+
+  /** Set once the backlog exists: a plan's 1-based place in it, if it has one. */
+  backlogPosition: (planPath: string) => number | undefined = () => undefined
 
   constructor(private readonly state: StateStore) {}
 
@@ -99,12 +104,17 @@ export class PlanTree
     const wt = this.state.worktree(plan.path)
     const live = this.isRunning(plan.path)
     const dup = plan.duplicates.length ? ` · ⚠ duplicate ${plan.duplicates.join(', ')}` : ''
-    const paused = tasks.filter((t) => this.state.get(plan.path, t.id).status === 'paused').map((t) => t.id)
+    const pausedTasks = tasks.filter((t) => this.state.get(plan.path, t.id).status === 'paused')
+    const limited = pausedTasks.filter((t) => this.state.get(plan.path, t.id).limitedUntil !== undefined)
+    const paused = pausedTasks.filter((t) => !limited.includes(t)).map((t) => t.id)
+    const resumes = Math.max(0, ...limited.map((t) => this.state.get(plan.path, t.id).limitedUntil ?? 0))
+    const place = this.backlogPosition(plan.path)
     item.description =
-      `${done}/${tasks.length}${paused.length ? ` · paused ${paused.join(', ')}` : ''}` +
+      `${done}/${tasks.length}${place ? ` · backlog #${place}` : ''}${paused.length ? ` · paused ${paused.join(', ')}` : ''}` +
+      `${limited.length ? ` · usage limit · resumes ${clock(resumes)}` : ''}` +
       `${wt ? ` · ${wt.branch}` : ''}${plan.runsAfter?.length ? ` · after ${plan.runsAfter.join(', ')}` : ''}${dup}`
-    // plan[.live][.wt] — the menus key on both.
-    item.contextValue = `plan${live ? '.live' : ''}${wt ? '.wt' : ''}`
+    // plan[.live][.wt][.bl] — the menus key on all three.
+    item.contextValue = `plan${live ? '.live' : ''}${wt ? '.wt' : ''}${place ? '.bl' : ''}`
     item.iconPath = new vscode.ThemeIcon(
       live ? 'sync~spin' : wt ? 'git-branch' : 'notebook',
       live ? new vscode.ThemeColor('charts.blue') : undefined,
@@ -139,7 +149,8 @@ Branch: ${wt.branch}, merges into ${wt.base}`
     if (st.costUsd !== undefined) bits.push(`$${st.costUsd.toFixed(2)}`)
     if (st.durationMs) bits.push(`${Math.round(st.durationMs / 1000)}s`)
     if (rewritten) bits.push('prompt rewritten')
-    if (st.reason) bits.push(st.reason)
+    if (st.status === 'paused' && st.limitedUntil !== undefined) bits.push(`usage limit · resumes ${clock(st.limitedUntil)}`)
+    else if (st.reason) bits.push(st.reason)
     item.description = bits.join(' · ')
 
     const look = ICONS[st.status]
@@ -156,6 +167,9 @@ Branch: ${wt.branch}, merges into ${wt.base}`
         node.task.deps ? `Depends on: ${node.task.deps.join(', ') || 'nothing — starts at once'}` : '',
         `Status: ${st.status}${st.reason ? ` — ${st.reason}` : ''}`,
         st.status === 'waiting' && st.question ? `**It asked:**\n\n${tail(st.question, 1200)}` : '',
+        st.status === 'paused' && st.limitedUntil !== undefined
+          ? `Paused by the usage limit, which resets at ${new Date(st.limitedUntil).toLocaleString()}. It resumes by itself after that (planQueue.resumeAfterLimit); Stop turns it into an ordinary pause.`
+          : '',
         st.status === 'paused' ? 'Resume carries on in the same session, with its changes still in the tree.' : '',
         rewritten ? '\n⚠ The prompt changed since this task ran.' : '',
         '\n---\n',

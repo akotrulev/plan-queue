@@ -1,5 +1,7 @@
 import * as vscode from 'vscode'
+import type { GateSnapshot } from './limits'
 import type { Worktree } from './git'
+import { INTERRUPTED } from './backlog'
 import type { Plan, Task } from './plan'
 
 export type Status = 'pending' | 'running' | 'waiting' | 'paused' | 'done' | 'blocked' | 'failed' | 'skipped'
@@ -20,6 +22,15 @@ export interface TaskState {
   logFile?: string
   /** Allowlist entries that would have let through calls the task was denied. */
   denied?: string[]
+  /** Paused by the usage limit, which resets at this time (ms epoch). */
+  limitedUntil?: number
+}
+
+/** The account-wide usage-limit state, kept across window reloads. */
+export interface LimitStore {
+  gate?: GateSnapshot
+  /** Plans started while the limit was on, to start at the reset. */
+  startAtReset: string[]
 }
 
 export interface PlanState {
@@ -40,6 +51,8 @@ export interface PlanWorktree extends Worktree {
 }
 
 const KEY = 'planQueue.state.v1'
+const LIMITS_KEY = 'planQueue.limits.v1'
+const BACKLOG_KEY = 'planQueue.backlog.v1'
 
 type Store = Record<string, PlanState>
 
@@ -52,6 +65,67 @@ export class StateStore {
 
   constructor(private readonly memento: vscode.Memento) {
     this.store = memento.get<Store>(KEY) ?? {}
+  }
+
+  limits(): LimitStore {
+    const v = this.memento.get<LimitStore>(LIMITS_KEY)
+    return { gate: v?.gate, startAtReset: Array.isArray(v?.startAtReset) ? v!.startAtReset : [] }
+  }
+
+  async setLimits(v: LimitStore): Promise<void> {
+    await this.memento.update(LIMITS_KEY, v)
+  }
+
+  /** The plan backlog: plan paths in the order to run them unattended. */
+  backlog(): string[] {
+    const v = this.memento.get<string[]>(BACKLOG_KEY)
+    return Array.isArray(v) ? v.filter((p) => typeof p === 'string') : []
+  }
+
+  async setBacklog(list: string[]): Promise<void> {
+    await this.memento.update(BACKLOG_KEY, list)
+  }
+
+  /** Task ids of a plan that the window closing paused. */
+  interruptedTasks(path: string): string[] {
+    return Object.entries(this.store[path]?.tasks ?? {})
+      .filter(([, t]) => t.status === 'paused' && t.limitedUntil === undefined && t.reason === INTERRUPTED)
+      .map(([id]) => id)
+  }
+
+  /** Every plan path the store knows. */
+  planPaths(): string[] {
+    return Object.keys(this.store)
+  }
+
+  /** Task ids of a plan that the usage limit paused. */
+  limitedTasks(path: string): string[] {
+    return Object.entries(this.store[path]?.tasks ?? {})
+      .filter(([, t]) => t.status === 'paused' && t.limitedUntil !== undefined)
+      .map(([id]) => id)
+  }
+
+  /** Task ids of a plan that are in any of these states. */
+  tasksWithStatus(path: string, ...statuses: Status[]): string[] {
+    return Object.entries(this.store[path]?.tasks ?? {})
+      .filter(([, t]) => statuses.includes(t.status))
+      .map(([id]) => id)
+  }
+
+  /**
+   * Turn a plan's limit-paused tasks (or one of them) into ordinary paused
+   * ones, which only a person resumes.
+   */
+  async clearLimited(path: string, only?: string): Promise<void> {
+    const tasks = this.store[path]?.tasks ?? {}
+    let any = false
+    for (const [id, t] of Object.entries(tasks)) {
+      if (t.limitedUntil === undefined || (only !== undefined && id !== only)) continue
+      t.limitedUntil = undefined
+      if (t.status === 'paused') t.reason = 'paused'
+      any = true
+    }
+    if (any) await this.save()
   }
 
   private async save(): Promise<void> {
@@ -155,7 +229,7 @@ export class StateStore {
       for (const [id, task] of Object.entries(plan.tasks)) {
         if (task.status !== 'running') continue
         plan.tasks[id] = task.sessionId
-          ? { ...task, status: 'paused', reason: 'interrupted when the window closed' }
+          ? { ...task, status: 'paused', reason: INTERRUPTED }
           : { ...task, status: 'pending' }
       }
     }

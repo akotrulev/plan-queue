@@ -16,11 +16,12 @@ import {
 } from './git'
 import { looksLikeAPlan, parsePlanText, readPlan, type Task } from './plan'
 import { successors, type PlanFacts } from './chain'
+import { LimitGate, type BlockOptions, type LimitInfo } from './limits'
 import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
 import { readyTasks, unknownDeps } from './schedule'
 import { gateFixPrompt } from './describe'
 import { NUDGE, RESUMED } from './verdict'
-import type { PlanWorktree, StateStore } from './state'
+import type { PlanWorktree, StateStore, TaskState } from './state'
 import type { PlanTree } from './tree'
 
 /** Output channel that also keeps the last lines, so a caller without VS Code can read the log. */
@@ -119,6 +120,8 @@ interface Run {
   closing: boolean
   /** Tasks paused during this run. */
   paused: string[]
+  /** Tasks of this run were paused by the usage limit, or withheld because of it. */
+  limited: boolean
   /** Runs in the workspace itself rather than a worktree, so it has the folder to itself. */
   inPlace: boolean
   /** Tasks may share the working tree at the same moment. */
@@ -138,6 +141,16 @@ interface Run {
   kicked: boolean
 }
 
+/** How long a rejection with no reset time blocks for. */
+const LIMIT_FALLBACK_MS = 30 * 60_000
+/** How long to wait before trying once more to resume a task the plan was not ready to take back. */
+const LIMIT_RETRY_MS = 5_000
+/** Waits before the first and second retry of a turn cut off by an API error. */
+const TRANSIENT_WAITS_MS = [60_000, 300_000]
+const TRANSIENT_NUDGE = 'Your previous turn was cut off by an API error. Check what was cut off and carry on.'
+
+const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
 export interface ActiveRun {
   planPath: string
   title: string
@@ -146,12 +159,42 @@ export interface ActiveRun {
   waiting: boolean
 }
 
-type RunOptions = { fromId?: string; onlyId?: string; reply?: string }
+type RunOptions = {
+  fromId?: string
+  onlyId?: string
+  reply?: string
+  /** Tasks to treat as already tried: a plan taken up again after a limit does not re-run what failed. */
+  skip?: string[]
+  /** Tasks to start at once, whatever they wait on: the ones the limit paused. */
+  force?: string[]
+}
 
 export class Queue implements vscode.Disposable {
   private readonly runs = new Map<string, Run>()
   private readonly channels = new Map<string, PlanLog>()
   private lastChannel: PlanLog | undefined
+  /** Plans handed to run() that have not claimed their slot yet. */
+  private readonly starting = new Set<string>()
+
+  /** What the account's usage limits say, shared by every plan and task. */
+  private readonly gate: LimitGate
+  /** Plans that were started while the limit was on, to start at the reset. */
+  private readonly startAtReset: Set<string>
+  private limitTimer: ReturnType<typeof setTimeout> | undefined
+  /** Set by dispose(); the limit timer is not armed again after it. */
+  private disposed = false
+  private readonly limitCleared = new vscode.EventEmitter<void>()
+  /** Fires once the usage limit has lifted and the plans waiting on it have been started. */
+  readonly onLimitCleared = this.limitCleared.event
+  private readonly runEnded = new vscode.EventEmitter<string>()
+  /** Fires with the plan's path once its run has ended, however it ended. */
+  readonly onRunEnded = this.runEnded.event
+  private readonly runStarted = new vscode.EventEmitter<string>()
+  /** Fires with the plan's path when a run claims its slot. */
+  readonly onRunStarted = this.runStarted.event
+  private readonly planStopped = new vscode.EventEmitter<string[]>()
+  /** Fires with the plans a person stopped or paused, so nothing restarts them by itself. */
+  readonly onPlanStopped = this.planStopped.event
 
   constructor(
     private readonly state: StateStore,
@@ -159,14 +202,179 @@ export class Queue implements vscode.Disposable {
     private readonly status: vscode.StatusBarItem,
     /** Where task transcripts go; none are kept without it. */
     private readonly logDir?: string,
-  ) {}
+  ) {
+    const saved = state.limits()
+    this.gate = LimitGate.restore(saved.gate)
+    this.startAtReset = new Set(saved.startAtReset)
+    // A window opened after the reset resumes at once; give the workspace a moment to load.
+    this.scheduleLimit(5000)
+  }
+
+  // ---- usage limit ---------------------------------------------------------
+
+  private limitOpts(): BlockOptions {
+    const pct = vscode.workspace.getConfiguration('planQueue').get<number>('limitStartThreshold', 0)
+    return {
+      startThreshold: Math.min(100, Math.max(0, Number(pct) || 0)) / 100,
+      fallbackMs: LIMIT_FALLBACK_MS,
+      resumeDelayMs: this.limitDelayMs(),
+    }
+  }
+
+  /** Until when nothing new should start (ms epoch), or undefined when the account is clear. */
+  private blockedUntil(): number | undefined {
+    return this.gate.blockedUntil(this.limitOpts())
+  }
+
+  /** The usage-limit block in force now: when it ends and which window it is. */
+  limitState(): { until?: number; type?: string } {
+    const until = this.blockedUntil()
+    return until === undefined ? {} : { until, type: this.gate.blockedType(this.limitOpts()) }
+  }
+
+  private persistLimits(): void {
+    void this.state.setLimits({ gate: this.gate.snapshot(), startAtReset: [...this.startAtReset] })
+  }
+
+  private feedGate(info: LimitInfo): void {
+    if (this.disposed) return
+    this.gate.observe(info)
+    this.persistLimits()
+    this.scheduleLimit()
+    void this.changed()
+  }
+
+  private limitedPlans(): string[] {
+    return this.state.planPaths().filter((p) => this.state.limitedTasks(p).length > 0)
+  }
+
+  /**
+   * When what the limit held back may resume, from the gate or from the tasks
+   * it paused. Both already include `limitResumeDelaySeconds`.
+   */
+  private resetTime(): number | undefined {
+    let end = this.gate.lastBlockEnd(this.limitOpts())
+    for (const p of this.state.planPaths()) {
+      for (const id of this.state.limitedTasks(p)) {
+        const u = this.state.get(p, id).limitedUntil
+        if (u && (end === undefined || u > end)) end = u
+      }
+    }
+    return end
+  }
+
+  /**
+   * One timer for the whole queue. It fires when the block, buffer included,
+   * ends, to refresh the status bar and resume what the limit held back.
+   * Rescheduled whenever the gate changes. With nothing blocking and nothing
+   * waiting there is no timer: the gate is only tidied.
+   */
+  private scheduleLimit(minMs = 0): void {
+    if (this.limitTimer) clearTimeout(this.limitTimer)
+    this.limitTimer = undefined
+    if (this.disposed) return
+    const now = Date.now()
+    const until = this.blockedUntil()
+    const pending = this.startAtReset.size > 0 || this.limitedPlans().length > 0
+    let at: number
+    if (until !== undefined) at = until
+    else {
+      const end = this.resetTime()
+      if (end === undefined) {
+        if (!pending) {
+          const before = this.gate.snapshot().entries.length
+          this.gate.prune()
+          if (this.gate.snapshot().entries.length !== before) this.persistLimits()
+          return
+        }
+        at = now
+      } else at = end
+    }
+    const wait = Math.min(Math.max(at - now, minMs), 2 ** 31 - 1)
+    this.limitTimer = setTimeout(() => void this.onLimitTimer(), wait)
+  }
+
+  private limitDelayMs(): number {
+    const s = vscode.workspace.getConfiguration('planQueue').get<number>('limitResumeDelaySeconds', 120)
+    return Math.max(0, Number(s) || 0) * 1000
+  }
+
+  private async onLimitTimer(): Promise<void> {
+    this.limitTimer = undefined
+    if (this.disposed) return
+    if (this.blockedUntil() !== undefined) return this.scheduleLimit()
+    const end = this.resetTime()
+    if (end !== undefined && Date.now() < end) {
+      await this.changed()
+      return this.scheduleLimit()
+    }
+    // A real block existed only when something said when it ends; a bare warning is not one.
+    const hadBlock = end !== undefined
+    const auto = vscode.workspace.getConfiguration('planQueue').get<boolean>('resumeAfterLimit', true)
+    const plans = auto ? new Set([...this.startAtReset, ...this.limitedPlans()]) : new Set<string>()
+    this.gate.clear()
+    if (auto) this.startAtReset.clear()
+    this.persistLimits()
+    for (const planPath of plans) this.resumeLimited(planPath, true)
+    // Plans already running may have ready tasks the gate held back; wake them.
+    for (const run of this.runs.values()) this.kick(run)
+    await this.changed()
+    if (this.disposed) return
+    if (hadBlock || plans.size) this.limitCleared.fire()
+  }
+
+  /**
+   * After the limit: a plan with no run is started with its limit-paused tasks
+   * forced and what failed or blocked left alone; a running plan resumes its
+   * limit-paused tasks. A refusal is logged, and tried once more shortly when
+   * it is only that the plan is mid-stop or the task mid-pause.
+   */
+  private resumeLimited(planPath: string, retry: boolean): void {
+    if (this.disposed) return
+    const run = this.runs.get(planPath)
+    const log = run?.out ?? this.channel(planPath, path.basename(planPath))
+    const limited = this.state.limitedTasks(planPath)
+    let temporary = false
+    const refused = (what: string, reason: string, soon: boolean) => {
+      log.appendLine(`  usage limit lifted, but ${what} did not resume: ${reason}`)
+      if (soon) temporary = true
+    }
+    if (!run) {
+      const skip = this.state.tasksWithStatus(planPath, 'blocked', 'failed')
+      const r = this.start(planPath, { force: limited, skip })
+      if (!r.ok) refused('the plan', r.reason, /already running/.test(r.reason))
+    } else {
+      for (const id of limited) {
+        const r = this.resume(planPath, id)
+        if (!r.ok) refused(id, r.reason, /stopping|still pausing/.test(r.reason))
+      }
+    }
+    if (temporary && retry) {
+      setTimeout(() => this.resumeLimited(planPath, false), LIMIT_RETRY_MS)
+    }
+  }
+
+  /** Waits `ms`, or until one of the signals aborts. True when it was aborted. */
+  private sleep(ms: number, ...signals: AbortSignal[]): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (signals.some((s) => s.aborted)) return resolve(true)
+      const done = (aborted: boolean) => {
+        clearTimeout(timer)
+        for (const s of signals) s.removeEventListener('abort', onAbort)
+        resolve(aborted)
+      }
+      const onAbort = () => done(true)
+      const timer = setTimeout(() => done(false), ms)
+      for (const s of signals) s.addEventListener('abort', onAbort, { once: true })
+    })
+  }
 
   get running(): boolean {
     return this.runs.size > 0
   }
 
   isRunning(planPath: string): boolean {
-    return this.runs.has(planPath)
+    return this.runs.has(planPath) || this.starting.has(planPath)
   }
 
   /** The tasks live in a plan right now, with whether each is waiting on a person. */
@@ -284,6 +492,17 @@ export class Queue implements vscode.Disposable {
 
   /** Stop one plan's run, or every run when no plan is given. */
   stop(planPath?: string): void {
+    // A stopped plan is not started again by the usage-limit timer: what the
+    // limit paused becomes an ordinary paused task, resumed only by a person.
+    const stopped = planPath ? [planPath] : [...this.runs.keys(), ...this.state.planPaths()]
+    let dropped = false
+    for (const p of stopped) {
+      dropped = this.startAtReset.delete(p) || dropped
+      void this.state.clearLimited(p)
+    }
+    if (dropped) this.persistLimits()
+    // Only plans that were doing something count as stopped; the rest were never going.
+    this.planStopped.fire(planPath ? [planPath] : [...this.runs.keys()])
     for (const run of this.runs.values()) {
       if (planPath && run.planPath !== planPath) continue
       run.stopRequested = true
@@ -303,10 +522,29 @@ export class Queue implements vscode.Disposable {
    * in that session. Pausing a whole plan also stops it starting anything new.
    * A task waiting on a question stays waiting. False when nothing was running.
    */
-  pause(planPath?: string, taskId?: string, now = false): boolean {
+  pause(planPath?: string, taskId?: string, now = false, keepLimits = false): boolean {
     let any = false
+    if (!keepLimits) {
+      // A person pausing takes the plan out of the usage limit's auto-resume.
+      if (taskId && planPath) {
+        if (this.state.limitedTasks(planPath).includes(taskId)) {
+          void this.state.clearLimited(planPath, taskId)
+          any = true
+        }
+      } else {
+        let dropped = false
+        for (const p of planPath ? [planPath] : [...this.runs.keys(), ...this.state.planPaths()]) {
+          dropped = this.startAtReset.delete(p) || dropped
+          if (this.state.limitedTasks(p).length) any = true
+          void this.state.clearLimited(p)
+        }
+        if (dropped) this.persistLimits()
+      }
+    }
+    const paused: string[] = []
     for (const run of this.runs.values()) {
       if (planPath && run.planPath !== planPath) continue
+      paused.push(run.planPath)
       if (taskId) {
         const live = run.live.get(taskId)
         if (!live || live.waiting) continue
@@ -323,6 +561,7 @@ export class Queue implements vscode.Disposable {
       any = true
       this.kick(run)
     }
+    if (any) this.planStopped.fire(paused)
     return any
   }
 
@@ -353,7 +592,14 @@ export class Queue implements vscode.Disposable {
 
   /** Closing the window pauses what is running, so it can be resumed when it opens again. */
   dispose(): void {
-    this.pause(undefined, undefined, true)
+    this.disposed = true
+    if (this.limitTimer) clearTimeout(this.limitTimer)
+    this.limitTimer = undefined
+    this.pause(undefined, undefined, true, true)
+    this.limitCleared.dispose()
+    this.runEnded.dispose()
+    this.runStarted.dispose()
+    this.planStopped.dispose()
     for (const out of this.channels.values()) out.dispose()
   }
 
@@ -370,9 +616,22 @@ export class Queue implements vscode.Disposable {
    * the answer to give a caller that is not looking at the VS Code window.
    */
   start(planPath: string, opts: RunOptions = {}): { ok: true } | { ok: false; reason: string } {
-    if (this.runs.has(planPath)) return { ok: false, reason: 'this plan is already running' }
+    if (this.isRunning(planPath)) return { ok: false, reason: 'this plan is already running' }
     if (!vscode.workspace.workspaceFolders?.length) return { ok: false, reason: 'no workspace folder is open' }
-    void this.run(planPath, opts)
+    // One task started by hand goes ahead; a plan waits for the limit to lift.
+    const until = opts.onlyId ? undefined : this.blockedUntil()
+    if (until !== undefined) {
+      const auto = vscode.workspace.getConfiguration('planQueue').get<boolean>('resumeAfterLimit', true)
+      if (auto) {
+        this.startAtReset.add(planPath)
+        this.persistLimits()
+        this.scheduleLimit()
+      }
+      void this.changed()
+      return { ok: false, reason: `usage limit until ${clock(until)}${auto ? '; it starts then' : ''}` }
+    }
+    this.starting.add(planPath)
+    void this.run(planPath, opts).finally(() => this.starting.delete(planPath))
     return { ok: true }
   }
 
@@ -424,6 +683,14 @@ export class Queue implements vscode.Disposable {
    * or skipped, the branch is merged back into the one it was cut from.
    */
   async run(planPath: string, opts: RunOptions = {}): Promise<void> {
+    try {
+      await this.runPlan(planPath, opts)
+    } finally {
+      this.runEnded.fire(planPath)
+    }
+  }
+
+  private async runPlan(planPath: string, opts: RunOptions): Promise<void> {
     if (this.runs.has(planPath)) {
       void vscode.window.showWarningMessage('Plan Queue is already running this plan.')
       return
@@ -444,12 +711,14 @@ export class Queue implements vscode.Disposable {
       out: this.channel(planPath, title),
       cwd: folder,
       live: new Map(),
-      attempted: new Set(),
-      forced: [],
+      attempted: new Set(opts.skip),
+      forced: [...(opts.force ?? [])],
       stopRequested: false,
-      halted: false,
+      // Taken up after a limit with failures behind it: only the forced tasks resume.
+      halted: !!opts.skip?.length && vscode.workspace.getConfiguration('planQueue').get<boolean>('stopOnFailure', true),
       closing: false,
       paused: [],
+      limited: false,
       inPlace: false,
       parallel: false,
       initialReply:
@@ -464,6 +733,7 @@ export class Queue implements vscode.Disposable {
     }
     // Claim the slot before the first await below, so a double click cannot start it twice.
     this.runs.set(planPath, run)
+    this.runStarted.fire(planPath)
     this.lastChannel = run.out
     await this.changed()
     run.out.show(true)
@@ -495,7 +765,18 @@ export class Queue implements vscode.Disposable {
       run.closing = true
       this.runs.delete(planPath)
       await this.changed()
-      if (run.paused.length && !run.stopRequested) {
+      if (run.limited && !run.stopRequested) {
+        const until = this.blockedUntil()
+        void vscode.window.showInformationMessage(
+          `Plan Queue — ${title}: usage limit${until ? ` until ${clock(until)}` : ''}.` +
+            (run.halted ? ' A task also failed, so the plan is stopped.' : '') +
+            (vscode.workspace.getConfiguration('planQueue').get<boolean>('resumeAfterLimit', true)
+              ? run.halted
+                ? ' After the reset only the tasks the limit paused resume.'
+                : ' It carries on by itself after the reset.'
+              : ' Resume it when the limit has reset.'),
+        )
+      } else if (run.paused.length && !run.stopRequested) {
         void vscode.window.showInformationMessage(
           `Plan Queue — ${title}: ${run.paused.join(', ')} paused. Resume picks up where it stopped.`,
         )
@@ -599,11 +880,25 @@ export class Queue implements vscode.Disposable {
           fromId: opts.fromId,
           onlyId: opts.onlyId,
         })
-        let busy = [...run.live.values()].filter((l) => l.busy).length
-        for (const task of ready) {
-          if (busy >= cfg.maxParallelTasks) break
-          this.launch(run, task)
-          busy++
+        const until = opts.onlyId ? undefined : this.blockedUntil()
+        if (until !== undefined) {
+          // Nothing new starts while the account is at its limit; the plan starts again at the reset.
+          if (ready.length) {
+            run.limited = true
+            if (vscode.workspace.getConfiguration('planQueue').get<boolean>('resumeAfterLimit', true)) {
+              this.startAtReset.add(planPath)
+              this.persistLimits()
+              this.scheduleLimit()
+            }
+            out.appendLine(`  usage limit until ${clock(until)}: not starting ${ready.map((t) => t.id).join(', ')}`)
+          }
+        } else {
+          let busy = [...run.live.values()].filter((l) => l.busy).length
+          for (const task of ready) {
+            if (busy >= cfg.maxParallelTasks) break
+            this.launch(run, task)
+            busy++
+          }
         }
       }
 
@@ -663,6 +958,9 @@ export class Queue implements vscode.Disposable {
     let followUp: { text: string; label: string } | undefined
     let nudged = false
     let gateFixes = 0
+    let transientTries = 0
+    // Spent before a retry that starts a fresh session, which would otherwise forget it.
+    let carry: { costUsd?: number; durationMs: number } | undefined
     let denied: string[] = []
     let ran = false
 
@@ -702,6 +1000,7 @@ export class Queue implements vscode.Disposable {
         ranHash: task.hash,
         // A fresh start must not leave an older session to be resumed by mistake.
         sessionId: resume ? before.sessionId : undefined,
+        limitedUntil: undefined,
       })
       await this.changed()
 
@@ -710,6 +1009,7 @@ export class Queue implements vscode.Disposable {
         parallel: run.parallel,
         sessionName: `plan-queue ${run.title} ${task.id}`,
         onSession: (id) => void this.state.set(planPath, task.id, { sessionId: id }),
+        onRateLimit: (info) => this.feedGate(info),
       })
       if (live.pausing) live.handle.pause()
       const result = await live.handle.result
@@ -720,11 +1020,13 @@ export class Queue implements vscode.Disposable {
       denied = [...new Set([...denied, ...result.denied])]
 
       // Cost and time add up across the turns of one task.
-      const costUsd =
+      const turnCost =
         resume && before.costUsd !== undefined && result.costUsd !== undefined
           ? before.costUsd + result.costUsd
           : result.costUsd ?? (resume ? before.costUsd : undefined)
-      const durationMs = result.durationMs + (resume ? before.durationMs ?? 0 : 0)
+      const costUsd = carry?.costUsd !== undefined ? (turnCost ?? 0) + carry.costUsd : turnCost
+      const durationMs = result.durationMs + (resume ? before.durationMs ?? 0 : 0) + (carry?.durationMs ?? 0)
+      carry = undefined
 
       if (result.paused) {
         await this.setPaused(run, live, sessionId, out, { costUsd, durationMs, denied })
@@ -744,6 +1046,64 @@ export class Queue implements vscode.Disposable {
         if (!reopen) await this.leaveBehind(run, live, out)
         await this.changed()
         return
+      }
+
+      if (result.limited) {
+        // The account is out of usage, not the task at fault: pause it where it stands.
+        this.feedGate(result.limited)
+        const reset = result.limited.resetsAt
+        const until =
+          this.blockedUntil() ??
+          (reset !== undefined ? reset + this.limitDelayMs() : Date.now() + LIMIT_FALLBACK_MS)
+        const type = result.limited.type ?? this.gate.blockedType(this.limitOpts())
+        const why = `usage limit${type ? ` (${type})` : ''} · resumes ${clock(until)}`
+        const totals = { costUsd, durationMs, denied }
+        if (run.stopRequested || live.pausing) {
+          // A person stopped or paused it as the turn ended: an ordinary pause, never auto-resumed.
+          await this.setPaused(run, live, sessionId, out, totals)
+          out.appendLine(`  ${task.id}: hit the ${why.split(' · ')[0]} while being stopped; it stays paused`)
+          await this.changed()
+          return
+        }
+        run.limited = true
+        if (sessionId) {
+          await this.setPaused(run, live, sessionId, out, totals, { reason: why, limitedUntil: until })
+        } else {
+          // Nothing to resume: the plan starts again at the reset instead.
+          await this.setPaused(run, live, undefined, out, totals)
+          if (vscode.workspace.getConfiguration('planQueue').get<boolean>('resumeAfterLimit', true)) {
+            this.startAtReset.add(planPath)
+            this.persistLimits()
+          }
+        }
+        out.appendLine(`  ${task.id}: ${why}`)
+        this.scheduleLimit()
+        await this.changed()
+        return
+      }
+
+      const retries = Math.max(0, vscode.workspace.getConfiguration('planQueue').get<number>('transientRetries', 2))
+      if (result.transient && transientTries < retries && !run.stopRequested && !live.pausing) {
+        const waitMs = TRANSIENT_WAITS_MS[Math.min(transientTries, TRANSIENT_WAITS_MS.length - 1)]
+        transientTries++
+        out.appendLine(
+          `  API error: ${result.reason ?? 'unknown'}; retrying in ${Math.round(waitMs / 60_000)} min (${transientTries} of ${retries})`,
+        )
+        await this.state.set(planPath, task.id, { sessionId, costUsd, durationMs })
+        const aborted = await this.sleep(waitMs, run.abort.signal, live.abort.signal)
+        if (aborted) {
+          if (live.pausing) {
+            await this.setPaused(run, live, sessionId, out, { costUsd, durationMs, denied })
+          } else {
+            await this.state.set(planPath, task.id, { status: 'pending', costUsd, durationMs, denied })
+            await this.leaveBehind(run, live, out)
+            await this.changed()
+          }
+          return
+        }
+        carry = sessionId ? undefined : { costUsd, durationMs }
+        followUp = sessionId ? { text: TRANSIENT_NUDGE, label: `retry ${transientTries} of ${retries} after an API error` } : undefined
+        continue
       }
 
       if (result.silent && !nudged) {
@@ -875,15 +1235,17 @@ export class Queue implements vscode.Disposable {
     sessionId: string | undefined,
     out: LogSink,
     totals: { costUsd?: number; durationMs?: number; denied?: string[] },
+    /** Set when something other than a person paused it: the usage limit. */
+    by?: Pick<TaskState, 'reason' | 'limitedUntil'>,
   ): Promise<void> {
     live.busy = false
     await this.state.set(
       run.planPath,
       live.task.id,
-      sessionId ? { status: 'paused', reason: 'paused', sessionId, ...totals } : { status: 'pending', ...totals },
+      sessionId ? { status: 'paused', reason: 'paused', sessionId, ...totals, ...by } : { status: 'pending', ...totals },
     )
     if (sessionId) {
-      run.paused.push(live.task.id)
+      if (!by) run.paused.push(live.task.id)
       out.appendLine(`  ${live.task.id} paused; its changes stay in the tree for the session to pick up`)
     }
     await this.changed()
@@ -1141,7 +1503,15 @@ export class Queue implements vscode.Disposable {
   private async changed(): Promise<void> {
     await vscode.commands.executeCommand('setContext', 'planQueue.running', this.runs.size > 0)
     const runs = [...this.runs.values()]
-    if (!runs.length) {
+    const limit = this.limitState()
+    if (limit.until !== undefined) {
+      this.status.text = `$(watch) usage limit until ${clock(limit.until)}`
+      this.status.tooltip =
+        `Claude Code's usage limit${limit.type ? ` (${limit.type})` : ''} resets at ${new Date(limit.until).toLocaleString()}. ` +
+        'Nothing new starts until then; paused tasks carry on by themselves after the reset.' +
+        (runs.length ? '\n\n' + runs.map((r) => r.title).join('\n') : '')
+      this.status.show()
+    } else if (!runs.length) {
       this.status.hide()
     } else {
       const lives = runs.flatMap((r) => [...r.live.values()])

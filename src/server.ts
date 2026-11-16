@@ -5,6 +5,7 @@ import * as os from 'os'
 import * as path from 'path'
 import * as vscode from 'vscode'
 import type { Plan } from './plan'
+import type { BacklogRunner } from './sweeper'
 import type { Queue } from './queue'
 import type { StateStore } from './state'
 import type { PlanTree } from './tree'
@@ -37,6 +38,7 @@ const INSTRUCTIONS = [
   'Tasks that declare `Depends on:` run in parallel when their dependencies are done.',
   'A task whose status is "waiting" has asked a question (see its `question`): answer it with reply.',
   'A task whose status is "paused" keeps its session: resume carries on in it.',
+  'The backlog is an ordered list of plans that run unattended, one after another: backlog_add puts a plan on it, backlog_list shows it.',
   'Do not start a plan from inside one of its own tasks.',
 ].join(' ')
 
@@ -52,6 +54,7 @@ export class ControlServer implements vscode.Disposable {
     private readonly tree: PlanTree,
     private readonly state: StateStore,
     private readonly log: vscode.OutputChannel,
+    private readonly backlog: BacklogRunner,
   ) {
     this.tools = this.defineTools()
   }
@@ -281,8 +284,9 @@ export class ControlServer implements vscode.Disposable {
         name: 'list_plans',
         description: 'List the plans in this workspace, with how far each has got.',
         inputSchema: { type: 'object', properties: {} },
-        run: async () =>
-          (await this.plans()).map((p) => {
+        run: async () => {
+          const limit = this.queue.limitState()
+          return (await this.plans()).map((p) => {
             const s = this.snapshot(p)
             return {
               plan: s.plan,
@@ -293,8 +297,12 @@ export class ControlServer implements vscode.Disposable {
               waiting: s.tasks.filter((t) => t.status === 'waiting').map((t) => t.id),
               blocked: s.tasks.filter((t) => t.status === 'blocked').map((t) => t.id),
               paused: s.tasks.filter((t) => t.status === 'paused').map((t) => t.id),
+              backlog: this.backlog.position(p.path),
+              // Account-wide, so the same on every entry; absent when the limit is clear.
+              usageLimit: limit.until === undefined ? undefined : { until: new Date(limit.until).toISOString(), type: limit.type },
             }
-          }),
+          })
+        },
       },
       {
         name: 'plan_status',
@@ -401,6 +409,54 @@ export class ControlServer implements vscode.Disposable {
             throw new ToolError('no such running task, or it is no longer taking input; name the task if several are running')
           }
           return { sent: true }
+        },
+      },
+      {
+        name: 'backlog_list',
+        description: 'The plan backlog in the order it runs: each plan with its position, progress, and whether it is running or stuck.',
+        inputSchema: { type: 'object', properties: {} },
+        run: async () => {
+          const plans = await this.plans()
+          return this.backlog.list().map((p, i) => {
+            const plan = plans.find((x) => x.path === p)
+            if (!plan) return { position: i + 1, plan: vscode.workspace.asRelativePath(p), missing: true }
+            const s = this.snapshot(plan)
+            return {
+              position: i + 1,
+              plan: s.plan,
+              title: s.title,
+              running: s.running,
+              done: s.tasks.filter((t) => t.status === 'done' || t.status === 'skipped').length,
+              total: s.tasks.length,
+              stuck: s.tasks.filter((t) => ['blocked', 'failed', 'waiting'].includes(t.status)).map((t) => `${t.id} ${t.status}`),
+            }
+          })
+        },
+      },
+      {
+        name: 'backlog_add',
+        description:
+          'Put a plan on the backlog, at the end or at a 1-based position; a plan already on it moves there. The backlog starts plans by itself, in order, up to planQueue.backlog.maxPlans at once, while no usage limit is on.',
+        inputSchema: {
+          type: 'object',
+          properties: { plan: planArg, position: { type: 'number', description: '1-based place in the backlog; default the end.' } },
+          required: ['plan'],
+        },
+        run: async (a) => {
+          const plan = await this.resolve(a.plan)
+          if (a.position !== undefined && !(Number(a.position) >= 1)) throw new ToolError('position is a number from 1')
+          const position = await this.backlog.add(plan.path, a.position === undefined ? undefined : Number(a.position))
+          return { added: this.rel(plan), position }
+        },
+      },
+      {
+        name: 'backlog_remove',
+        description: 'Take a plan off the backlog. A plan that is running carries on.',
+        inputSchema: { type: 'object', properties: { plan: planArg }, required: ['plan'] },
+        run: async (a) => {
+          const plan = await this.resolve(a.plan)
+          if (!(await this.backlog.remove(plan.path))) throw new ToolError(`${this.rel(plan)} is not on the backlog`)
+          return { removed: this.rel(plan) }
         },
       },
       {

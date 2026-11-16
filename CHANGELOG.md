@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+- **The usage limit is a pause, not a failure.** When Claude Code hits the
+  5-hour or weekly limit, the task is paused with its session and changes kept,
+  the plan is not halted, and nothing new starts anywhere until the reset. The
+  status bar shows `usage limit until 03:02`. After the reset (plus
+  `planQueue.limitResumeDelaySeconds`, 120, which new starts wait out too) the
+  plans carry on by themselves, also when the window is reopened later: only the
+  paused tasks resume, and a blocked or failed task is not run again. A plan
+  started during the limit starts at the reset. Stop and Pause cancel this for a
+  plan. Reset times in the text such as `resets Nov 21, 10am (Europe/Sofia)` and
+  `resets 15:30` are read, with their zone. Off with `planQueue.resumeAfterLimit`.
+- **Optional throttle.** `planQueue.limitStartThreshold` stops new tasks from
+  starting once a usage window is that percent full.
+- **Temporary API errors are retried.** A turn cut off by an overloaded or 5xx
+  error or a dropped connection (never a 4xx) is retried in the same session after 1 minute,
+  then 5 (`planQueue.transientRetries`, default 2), before the task fails.
+- `list_plans` shows the usage limit while one is on.
+- **A plan backlog for running unattended.** Add plans to an ordered backlog
+  from the tree (*Add to the backlog*, move up and down, remove), and Plan Queue
+  starts them one after another by itself: when a plan finishes, when a usage
+  limit lifts, after the window opens, and every `planQueue.backlog.sweepMinutes`
+  (5). `planQueue.backlog.maxPlans` (1) sets how many run at once. Stuck plans
+  (blocked, failed, waiting, paused), plans you stopped, plans whose `Runs after:`
+  is not met and plans whose file is uncommitted are skipped, with a notice once
+  for a stuck one. A finished and merged plan leaves the backlog. Off with
+  `planQueue.backlog.enabled`. The tree shows `backlog #2`; the command palette
+  has *Show the backlog*.
+- **Resume on open.** `planQueue.resumeOnOpen` (off) resumes the plans whose
+  tasks the window closing paused, once the window is open again.
+- New MCP tools `backlog_list`, `backlog_add`, `backlog_remove`, and
+  `pq backlog [add|remove] <plan>`. `list_plans` shows each plan's `backlog`
+  position.
+
 ## 0.5.1
 
 - **A quoted `Depends on:` line inside a fenced prompt is read.** A prompt

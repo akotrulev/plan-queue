@@ -18,6 +18,9 @@ const USAGE = `pq — control Plan Queue
   pq stop [plan]                           stop one plan, or all
   pq pause [plan] [T3]                     pause a task, a plan, or all; the session is kept
   pq resume <plan> [T3]                    carry on after a pause, in the same session
+  pq backlog                               the backlog, in the order it runs
+  pq backlog add <plan> [position]         put a plan on it (1-based position; default the end)
+  pq backlog remove <plan>                 take a plan off it
 
 <plan> is a path, file name or title; a unique fragment is enough.
 Exit status is 1 when the server refuses.`
@@ -111,6 +114,14 @@ switch (cmd) {
   case 'resume':
     out = await call('resume', { plan: rest[0], task: rest[1] })
     break
+  case 'backlog': {
+    const [sub, plan, position] = rest
+    if (!sub || sub === 'list') out = await call('backlog_list', {})
+    else if (sub === 'add') out = await call('backlog_add', { plan, position: position ? Number(position) : undefined })
+    else if (sub === 'remove') out = await call('backlog_remove', { plan })
+    else die('usage: pq backlog [add <plan> [position] | remove <plan>]')
+    break
+  }
   default:
     console.log(USAGE)
     process.exit(cmd && cmd !== 'help' && cmd !== '--help' ? 1 : 0)
