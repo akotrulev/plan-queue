@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - **Every task is a real Claude Code session.** A task now runs as a Claude
   Code background session (`claude --bg`) instead of `claude -p`, and gets a
