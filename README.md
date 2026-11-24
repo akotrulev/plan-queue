@@ -93,8 +93,8 @@ turn ended, follows up, and stops it.
   Claude Code extension opens a session — without taking the keyboard, running
   `claude attach <session>`: the full Claude Code UI on that session. When the
   task needs you, its tab is brought forward. When the task is done its session
-  stops, but the tab stays, with the whole conversation in it; Enter attaches
-  again, and the queue does that itself when it resumes the same session.
+  stops, but the tab stays and shows the task's transcript — what it said, the
+  tools it ran, how it ended; Enter attaches again, and the queue does that itself when it resumes the same session.
   `planQueue.sessionTerminalLocation` puts them in the terminal panel instead. Closing the terminal leaves
   the session running; *Open the task's session* (the terminal button on a
   running task, or right-click) opens it again. `planQueue.sessionTerminals`

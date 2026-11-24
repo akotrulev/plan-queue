@@ -13,12 +13,14 @@ interface Open {
 
 /**
  * `claude attach` ends when its session stops — as it does once its task is
- * done. In a loop the tab stays, with the whole conversation in it, and Enter
- * attaches again; the queue presses it when it starts the session again.
+ * done — and clears its screen as it goes. In a loop the tab stays: it shows
+ * the task's transcript ($2) in its place, and Enter attaches again; the queue
+ * presses it when it starts the session again. $3 is the session id.
  */
 const ATTACH_LOOP =
   'while :; do "$0" attach "$1"; ' +
-  'printf "\\n\\033[2m— the session has stopped. Press Enter to attach again, or close this tab.\\033[0m\\n"; ' +
+  'if [ -f "$2" ]; then printf "\\033[2J\\033[3J\\033[H"; cat "$2"; fi; ' +
+  'printf "\\n\\033[2m— the session has stopped (claude --resume %s). Press Enter to attach again, or close this tab.\\033[0m\\n" "$3"; ' +
   'read -r _ || exit 0; done'
 
 /**
@@ -33,7 +35,11 @@ export class SessionTerminals implements vscode.Disposable {
   private readonly trusting = new Map<string, vscode.Terminal>()
   private readonly closing: vscode.Disposable
 
-  constructor(private readonly claudePath: () => string) {
+  constructor(
+    private readonly claudePath: () => string,
+    /** The task's latest Plan Queue transcript, shown once its session has stopped. */
+    private readonly logFile: (planPath: string, taskId: string) => string | undefined,
+  ) {
     this.closing = vscode.window.onDidCloseTerminal((t) => {
       for (const [key, o] of this.open) if (o.terminal === t) this.open.delete(key)
       for (const [cwd, o] of this.trusting) if (o === t) this.trusting.delete(cwd)
@@ -121,7 +127,17 @@ export class SessionTerminals implements vscode.Disposable {
     const terminal = vscode.window.createTerminal({
       name: `${e.taskId} · ${e.title}`,
       ...(looped
-        ? { shellPath: '/bin/sh', shellArgs: ['-c', ATTACH_LOOP, this.claudePath(), shortId(e.sessionId)] }
+        ? {
+            shellPath: '/bin/sh',
+            shellArgs: [
+              '-c',
+              ATTACH_LOOP,
+              this.claudePath(),
+              shortId(e.sessionId),
+              this.logFile(e.planPath, e.taskId) ?? '',
+              e.sessionId,
+            ],
+          }
         : { shellPath: this.claudePath(), shellArgs: ['attach', shortId(e.sessionId)] }),
       cwd: e.cwd,
       iconPath: new vscode.ThemeIcon('hubot'),

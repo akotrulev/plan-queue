@@ -34,7 +34,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   )
   tree.isRunning = (planPath) => queue.isRunning(planPath)
 
-  const terminals = new SessionTerminals(() => readConfig().claudePath)
+  const terminals = new SessionTerminals(
+    () => readConfig().claudePath,
+    (planPath, taskId) => state.get(planPath, taskId).logFile,
+  )
   const sessionEvents = queue.onSession((e) =>
     terminals.onSession({
       planPath: e.planPath,
