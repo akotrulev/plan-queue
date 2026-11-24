@@ -644,7 +644,7 @@
             "never"
           ],
           "enumDescriptions": [
-            "Open a terminal on each task's session as it starts, in the background, and bring it forward when the task needs you.",
+            "Open a tab on each task's session as it starts, behind the tab you are looking at.",
             "Open a task's terminal only once it needs you: a question, or a prompt in its session.",
             "Never open one by itself; use \"Open the task's session\"."
           ],

@@ -70,8 +70,8 @@ export class SessionTerminals implements vscode.Disposable {
 
   /**
    * A session came up or needs a person. Per planQueue.sessionTerminals, its
-   * terminal is opened in the background as it starts, and brought forward —
-   * without taking the keyboard — when it waits on a person.
+   * tab is opened as it starts, or once it needs a person — behind the tab
+   * being looked at, which stays in view.
    */
   onSession(e: {
     planPath: string
@@ -89,8 +89,9 @@ export class SessionTerminals implements vscode.Disposable {
       had.terminal.sendText('', true)
     }
     if (mode === 'never' || (mode === 'whenNeeded' && !e.attention)) return
-    const t = this.ensure(e)
-    if (e.attention) t.show(true)
+    // Never brought forward by itself: the notification, the tree and the
+    // status bar say it needs you, and a click opens it.
+    this.ensure(e, true)
   }
 
   /**
@@ -146,13 +147,33 @@ export class SessionTerminals implements vscode.Disposable {
         had.review = { cwd: e.cwd }
         setTimeout(() => had.terminal.sendText('', true), 1500)
       }
-      had.terminal.show(!focus)
+      if (focus) had.terminal.show(false)
       return
     }
-    const t = this.ensure(e)
+    const t = this.ensure(e, !focus)
     const now = this.open.get(`${e.planPath}#${e.taskId}`)
     if (now) now.review = { cwd: e.cwd }
-    t.show(!focus)
+    if (focus) t.show(false)
+  }
+
+  /**
+   * An editor terminal always opens as its group's visible tab; there is no
+   * opening one behind. So when the queue opens one by itself, the tab that
+   * was showing — a session being read, a file, a chat — is put back at once.
+   */
+  private keepView(background: boolean, create: () => vscode.Terminal): vscode.Terminal {
+    const group = vscode.window.tabGroups.activeTabGroup
+    const before = group.activeTab
+    const terminal = create()
+    if (!background || !before || this.location() === vscode.TerminalLocation.Panel) return terminal
+    setTimeout(() => {
+      const g = vscode.window.tabGroups.activeTabGroup
+      if (g.activeTab && sameTab(g.activeTab, before)) return
+      const i = g.tabs.findIndex((t) => sameTab(t, before))
+      // Opens the editor at that position in the active editor's group.
+      if (i >= 0) void vscode.commands.executeCommand('workbench.action.openEditorAtIndex', i)
+    }, 150)
+    return terminal
   }
 
   /** Bring the task's tab forward with the cursor in it. False when it has none open. */
@@ -165,10 +186,17 @@ export class SessionTerminals implements vscode.Disposable {
 
   /** Open the task's session in a terminal and put the cursor in it. */
   show(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string }): void {
-    this.ensure(e).show(false)
+    this.ensure(e, false).show(false)
   }
 
-  private ensure(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string }): vscode.Terminal {
+  /**
+   * The task's tab, opened when it has none. `background`: opened by the queue
+   * rather than by the person, so the tab they were looking at is put back.
+   */
+  private ensure(
+    e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string },
+    background: boolean,
+  ): vscode.Terminal {
     const key = `${e.planPath}#${e.taskId}`
     const had = this.open.get(key)
     // The same session's tab is kept; another run of the task gets a tab of its own.
@@ -176,7 +204,7 @@ export class SessionTerminals implements vscode.Disposable {
     had?.terminal.dispose()
     // No sh on Windows: there the tab closes with the session.
     const looped = process.platform !== 'win32'
-    const terminal = vscode.window.createTerminal({
+    const terminal = this.keepView(background, () => vscode.window.createTerminal({
       name: `${e.taskId} · ${e.title}`,
       ...(looped
         ? {
@@ -196,7 +224,7 @@ export class SessionTerminals implements vscode.Disposable {
       location: this.location(),
       // A reload restores nothing: the queue opens what it still runs.
       isTransient: true,
-    })
+    }))
     this.open.set(key, { terminal, sessionId: e.sessionId, looped })
     return terminal
   }
@@ -208,4 +236,13 @@ export class SessionTerminals implements vscode.Disposable {
       if (o.review) stopSession(this.claudePath(), shortId(o.sessionId), o.review.cwd)
     }
   }
+}
+
+/** The same tab, across the Tab objects VS Code hands out for it. */
+function sameTab(a: vscode.Tab, b: vscode.Tab): boolean {
+  if (a.label !== b.label) return false
+  const ia = a.input as { uri?: vscode.Uri; viewType?: string } | undefined
+  const ib = b.input as { uri?: vscode.Uri; viewType?: string } | undefined
+  if (ia?.constructor !== ib?.constructor) return false
+  return ia?.uri?.toString() === ib?.uri?.toString() && ia?.viewType === ib?.viewType
 }

@@ -16,13 +16,16 @@
   conversation can be reviewed in Claude Code — closing the tab stops it. A
   stopped session's tab shows the task's transcript and re-attaches in place
   when the queue resumes it.
+- **Tabs open behind the one you are on.** A session starting, a task needing
+  you, or a failed task kept for review never switches the tab you are looking
+  at; tabs you open yourself still come forward.
 - Clicking a task brings its session's tab forward while one is open, and
   otherwise opens its prompt; the inline button still opens the prompt.
 - The plan's output channel no longer opens when a plan starts, unless
   `planQueue.sessionTerminals` is `never`; *Show the log* still opens it.
 - **Questions are answered in the session.** A task that ends on
-  `PLAN_QUEUE: QUESTION` keeps its session up, its terminal comes forward, and
-  the queue carries on once you answer there. *Reply*, `pq reply` and the MCP
+  `PLAN_QUEUE: QUESTION` keeps its session up, and the queue carries on once
+  you answer in its tab. *Reply*, `pq reply` and the MCP
   `reply` tool still work: they resume the session with the answer.
 - **Questions come with options.** A task that needs you asks with Claude
   Code's question picker, offering the likely answers; you pick one in its tab

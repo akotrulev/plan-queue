@@ -90,9 +90,12 @@ turn ended, follows up, and stops it.
 
 - **A tab per task.** As a task's session starts, a terminal named after the
   task (`T3 · Orders API`) opens as an editor tab beside your files — as the
-  Claude Code extension opens a session — without taking the keyboard, running
-  `claude attach <session>`: the full Claude Code UI on that session. When the
-  task needs you, its tab is brought forward. When a task **passes**, its
+  Claude Code extension opens a session — running `claude attach <session>`:
+  the full Claude Code UI on that session. It opens **behind** the tab you are
+  on: the session you are reading or typing into stays in view, and so does
+  any file. Nothing switches tabs by itself; a task that needs you says so in
+  the tree, the status bar and a notification, and its tab is one click away.
+  When a task **passes**, its
   session is stopped and its tab closes. When one **fails or is blocked**, its
   tab stays and attaches again — which wakes the stopped session — so the whole
   conversation is there to review in Claude Code itself; closing the tab stops
@@ -193,8 +196,7 @@ genuinely cannot go on). So does one that ended with no sentinel and still gave
 none when asked. Instead of failing, the task goes to **waiting for reply**:
 
 - It turns yellow in the tree, its question is in the tooltip and at the end of
-  the log, its terminal comes forward, and a notification shows the gist with an
-  **Open session** button.
+  the log, and a notification shows the gist with an **Open session** button.
 - Only that task waits. Other tasks and plans keep running, and the plan's
   worktree stays as it is.
 - Its session stays up. **Answer by typing into it** — the task's terminal, or
@@ -216,8 +218,9 @@ system prompt tells it to, and keeps `PLAN_QUEUE: QUESTION` for when that tool
 is not there. The session stops **mid-turn** on it, as it does on a permission
 prompt for a command that is not on the allowlist. The task shows as
 `waiting · needs you in its session`, with the question and its options in the
-tooltip and the notification; its tab comes forward, you pick an option (or
-type your own) there, and the task goes back to working.
+tooltip and the notification; open its tab (a click on the task, or the
+notification), pick an option (or type your own), and the task goes back to
+working.
 - Cost and duration add up across the turns of a task.
 
 With `planQueue.requireSentinel` off, a turn that ends cleanly is done, so a
