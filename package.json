@@ -651,6 +651,19 @@
           "default": "onStart",
           "description": "Each task runs as a Claude Code background session; its terminal runs `claude attach` on it, the full Claude Code UI. Closing the terminal leaves the session running."
         },
+        "planQueue.sessionTerminalLocation": {
+          "type": "string",
+          "enum": [
+            "editor",
+            "panel"
+          ],
+          "enumDescriptions": [
+            "An editor tab beside your files, as the Claude Code extension opens a session.",
+            "The terminal panel at the bottom."
+          ],
+          "default": "editor",
+          "description": "Where a task's session terminal opens."
+        },
         "planQueue.allowedTools": {
           "type": "array",
           "items": {

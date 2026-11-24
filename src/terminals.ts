@@ -11,8 +11,9 @@ interface Open {
 
 /**
  * One VS Code terminal per task, running `claude attach` on the task's
- * background session — the full Claude Code UI, driven by the queue. Closing
- * the terminal leaves the session running; the queue still owns it.
+ * background session — the full Claude Code UI, driven by the queue, in an
+ * editor tab by default. Closing it leaves the session running; the queue
+ * still owns it.
  */
 export class SessionTerminals implements vscode.Disposable {
   private readonly open = new Map<string, Open>()
@@ -29,6 +30,17 @@ export class SessionTerminals implements vscode.Disposable {
 
   private mode(): Mode {
     return vscode.workspace.getConfiguration('planQueue').get<Mode>('sessionTerminals', 'onStart')
+  }
+
+  /**
+   * Where a new terminal goes: an editor tab beside the files, as the Claude
+   * Code extension opens a session, or the terminal panel. Opening one never
+   * takes the keyboard; showing it does when asked to.
+   */
+  private location(): vscode.TerminalOptions['location'] {
+    return vscode.workspace.getConfiguration('planQueue').get<string>('sessionTerminalLocation', 'editor') === 'panel'
+      ? vscode.TerminalLocation.Panel
+      : { viewColumn: vscode.ViewColumn.Active, preserveFocus: true }
   }
 
   /**
@@ -61,6 +73,7 @@ export class SessionTerminals implements vscode.Disposable {
       shellPath: this.claudePath(),
       cwd,
       iconPath: new vscode.ThemeIcon('shield'),
+      location: this.location(),
       isTransient: true,
     })
     this.trusting.set(cwd, terminal)
@@ -84,6 +97,7 @@ export class SessionTerminals implements vscode.Disposable {
       shellArgs: ['attach', shortId(e.sessionId)],
       cwd: e.cwd,
       iconPath: new vscode.ThemeIcon('hubot'),
+      location: this.location(),
       // A reload restores nothing: the queue opens what it still runs.
       isTransient: true,
     })

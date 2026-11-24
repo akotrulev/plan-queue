@@ -88,10 +88,12 @@ you can open it in a terminal, watch it work, answer its prompts and type into
 it, while the queue drives it — starts it with the task's prompt, judges how its
 turn ended, follows up, and stops it.
 
-- **A terminal per task.** As a task's session starts, a terminal named after
-  the task (`T3 · Orders API`) opens in the background, running
-  `claude attach <session>` — the full Claude Code UI on that session. When the
-  task needs you, its terminal is brought forward. Closing the terminal leaves
+- **A tab per task.** As a task's session starts, a terminal named after the
+  task (`T3 · Orders API`) opens as an editor tab beside your files — as the
+  Claude Code extension opens a session — without taking the keyboard, running
+  `claude attach <session>`: the full Claude Code UI on that session. When the
+  task needs you, its tab is brought forward. `planQueue.sessionTerminalLocation`
+  puts them in the terminal panel instead. Closing the terminal leaves
   the session running; *Open the task's session* (the terminal button on a
   running task, or right-click) opens it again. `planQueue.sessionTerminals`
   chooses `onStart` (default), `whenNeeded` or `never`.
@@ -545,6 +547,7 @@ ceiling: `--max-budget-usd` works only with `claude -p`, so
 | `planQueue.model` | — | `--model` for every task |
 | `planQueue.permissionMode` | `acceptEdits` | `--permission-mode` each session starts with |
 | `planQueue.sessionTerminals` | `onStart` | When a task's session gets a terminal: `onStart`, `whenNeeded`, `never` |
+| `planQueue.sessionTerminalLocation` | `editor` | Where it opens: an editor tab, or the terminal `panel` |
 | `planQueue.allowedTools` | a working set | Commands allowed without a prompt |
 | `planQueue.gateCommand` | — | Shell check after each task |
 | `planQueue.gateTimeoutMinutes` | `30` | Kill a gate or setup command after this long; 0 is no limit |
