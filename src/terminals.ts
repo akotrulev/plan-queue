@@ -70,8 +70,8 @@ export class SessionTerminals implements vscode.Disposable {
 
   /**
    * A session came up or needs a person. Per planQueue.sessionTerminals, its
-   * tab is opened as it starts, or once it needs a person — behind the tab
-   * being looked at, which stays in view.
+   * tab is opened once it needs a person, in view, or (onStart) as it starts,
+   * behind the tab being looked at.
    */
   onSession(e: {
     planPath: string
@@ -89,9 +89,11 @@ export class SessionTerminals implements vscode.Disposable {
       had.terminal.sendText('', true)
     }
     if (mode === 'never' || (mode === 'whenNeeded' && !e.attention)) return
-    // Never brought forward by itself: the notification, the tree and the
-    // status bar say it needs you, and a click opens it.
-    this.ensure(e, true)
+    // A task that needs you comes forward like any tab that opens, keeping the
+    // keyboard where it was, so a keystroke meant elsewhere cannot answer it.
+    // One that is only starting (onStart) opens behind the tab in view.
+    if (e.attention) this.ensure(e, false).show(true)
+    else this.ensure(e, true)
   }
 
   /**
@@ -147,19 +149,20 @@ export class SessionTerminals implements vscode.Disposable {
         had.review = { cwd: e.cwd }
         setTimeout(() => had.terminal.sendText('', true), 1500)
       }
-      if (focus) had.terminal.show(false)
+      had.terminal.show(!focus)
       return
     }
-    const t = this.ensure(e, !focus)
+    const t = this.ensure(e, false)
     const now = this.open.get(`${e.planPath}#${e.taskId}`)
     if (now) now.review = { cwd: e.cwd }
-    if (focus) t.show(false)
+    t.show(!focus)
   }
 
   /**
    * An editor terminal always opens as its group's visible tab; there is no
-   * opening one behind. So when the queue opens one by itself, the tab that
-   * was showing — a session being read, a file, a chat — is put back at once.
+   * opening one behind. So when a tab opens only because its task started
+   * (onStart), the tab that was showing — a session being read, a file, a
+   * chat — is put back at once.
    */
   private keepView(background: boolean, create: () => vscode.Terminal): vscode.Terminal {
     const group = vscode.window.tabGroups.activeTabGroup

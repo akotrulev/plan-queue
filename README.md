@@ -93,9 +93,10 @@ turn ended, follows up, and stops it.
   after the task (`T3 · Orders API`) and running `claude attach <session>`: the
   full Claude Code UI on that session. By default a tab opens only when the
   task **asks you something**, when it **fails or is blocked**, or when **you
-  click it**. Tabs the queue opens open **behind** the one you are on: the
-  session you are reading or typing into stays in view. A task that needs you
-  also says so in the tree, the status bar and a notification.
+  click it**. A tab that opens for a question or a failure comes to the front
+  like any tab that opens, but leaves the keyboard where it was, so a keystroke
+  meant for another tab cannot answer it. A task that needs you also says so in
+  the tree, the status bar and a notification.
 - **Clicking a task** brings its tab forward when it has one open, opens its
   session when it has one (running, waiting, blocked or failed), and otherwise
   opens its prompt in the plan — which the task's inline button does for every
@@ -109,7 +110,8 @@ turn ended, follows up, and stops it.
   itself when the queue resumes it. Closing a running task's tab leaves its
   session running.
 - `planQueue.sessionTerminals` chooses when tabs open by themselves:
-  `whenNeeded` (default), `onStart` (every task as it starts) or `never`.
+  `whenNeeded` (default), `onStart` (every task as it starts, behind the tab
+  you are on) or `never`.
   `planQueue.sessionTerminalLocation` puts them in the terminal panel instead
   of the editor.
 - The queue watches the session through `claude agents --json` and reads its

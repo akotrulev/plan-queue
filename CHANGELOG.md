@@ -17,9 +17,9 @@
   conversation can be reviewed in Claude Code — closing the tab stops it. A
   stopped session's tab shows the task's transcript and re-attaches in place
   when the queue resumes it.
-- **Tabs open behind the one you are on.** A session starting, a task needing
-  you, or a failed task kept for review never switches the tab you are looking
-  at; tabs you open yourself still come forward.
+- A tab that opens for a question or a failure comes to the front without
+  taking the keyboard; with `onStart`, a tab that opens only because its task
+  started opens behind the one you are on.
 - Clicking a task brings its tab forward, or opens its session when it has
   one, and otherwise opens its prompt; the inline button still opens the prompt.
 - The plan's output channel no longer opens when a plan starts, unless
