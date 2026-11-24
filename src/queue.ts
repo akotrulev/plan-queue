@@ -180,6 +180,8 @@ export interface SessionEvent {
   cwd: string
   /** It waits on a person: a question, or a prompt in its session. */
   attention: boolean
+  /** The session was (re)started just now, rather than only being looked at. */
+  launched?: boolean
 }
 
 /** What awaitReply hands back: an answer to send, or word that the person answered in the session itself. */
@@ -770,7 +772,10 @@ export class Queue implements vscode.Disposable {
     this.runStarted.fire(planPath)
     this.lastChannel = run.out
     await this.changed()
-    run.out.show(true)
+    // The tasks' own tabs show what they do; the log comes forward only without them.
+    if (vscode.workspace.getConfiguration('planQueue').get<string>('sessionTerminals', 'onStart') === 'never') {
+      run.out.show(true)
+    }
 
     let merged = false
     try {
@@ -1053,9 +1058,9 @@ export class Queue implements vscode.Disposable {
         resume,
         parallel: run.parallel,
         sessionName: `plan-queue ${run.title} ${task.id}`,
-        onSession: (id) => {
+        onSession: (id, launched) => {
           void this.state.set(planPath, task.id, { sessionId: id })
-          this.sessionEvent.fire({ planPath, task, sessionId: id, cwd: run.cwd, attention: false })
+          this.sessionEvent.fire({ planPath, task, sessionId: id, cwd: run.cwd, attention: false, launched })
         },
         onBlocked: (question) => void this.setBlocked(run, live, question),
         onUntrusted: (cwd) => void this.setUntrusted(run, live, cwd),

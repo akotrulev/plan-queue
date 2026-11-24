@@ -115,9 +115,10 @@ export interface TaskRunOptions {
   /**
    * Called as soon as the session is up, long before the result, so a window
    * that closes mid-task still knows which session to resume, and a terminal
-   * can be attached to it.
+   * can be attached to it. `launched` is false when the queue only took over
+   * watching a session the person carried on themselves.
    */
-  onSession?: (sessionId: string) => void
+  onSession?: (sessionId: string, launched: boolean) => void
   /**
    * The session stopped mid-turn on something only a person can answer in it
    * — a permission prompt, a question — with what it last said; undefined
@@ -406,7 +407,7 @@ export function runTask(
       // The person already carried the session on from its terminal: only watch it.
       short = shortId(resume.sessionId)
       reader = new TranscriptReader(locate, resume.adopt.offset)
-      opts.onSession?.(resume.sessionId)
+      opts.onSession?.(resume.sessionId, false)
     } else {
       let offset = 0
       const known = resume ? (await listSessions(cfg.claudePath, cwd))?.find((e) => e.sessionId === resume.sessionId) : undefined
@@ -493,7 +494,7 @@ export function runTask(
         offset = 0
         costAtStart = 0
       }
-      opts.onSession?.(id)
+      opts.onSession?.(id, true)
       flush()
       out.appendLine(`  session ${short} · claude attach ${short}`)
       reader = new TranscriptReader(locate, offset)

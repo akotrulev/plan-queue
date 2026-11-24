@@ -92,8 +92,10 @@ turn ended, follows up, and stops it.
   task (`T3 · Orders API`) opens as an editor tab beside your files — as the
   Claude Code extension opens a session — without taking the keyboard, running
   `claude attach <session>`: the full Claude Code UI on that session. When the
-  task needs you, its tab is brought forward. `planQueue.sessionTerminalLocation`
-  puts them in the terminal panel instead. Closing the terminal leaves
+  task needs you, its tab is brought forward. When the task is done its session
+  stops, but the tab stays, with the whole conversation in it; Enter attaches
+  again, and the queue does that itself when it resumes the same session.
+  `planQueue.sessionTerminalLocation` puts them in the terminal panel instead. Closing the terminal leaves
   the session running; *Open the task's session* (the terminal button on a
   running task, or right-click) opens it again. `planQueue.sessionTerminals`
   chooses `onStart` (default), `whenNeeded` or `never`.
@@ -292,7 +294,8 @@ the wait. Only when the retries are used up does the task fail as usual.
 
 ### Logs
 
-Each plan has an output channel, **Plan Queue — <plan title>**. It shows what
+Each plan has an output channel, **Plan Queue — <plan title>**, which does not
+pop up while the tasks' own tabs are there (*Show the log* opens it). It shows what
 the model says and, for each tool call, what it did — `$ pnpm test`,
 `Edit src/cart.ts`, `Grep TODO in src` — plus `✗` and the first line of any tool
 call that failed. Thinking is left out unless `planQueue.logThinking` is on.

@@ -7,7 +7,19 @@ type Mode = 'onStart' | 'whenNeeded' | 'never'
 interface Open {
   terminal: vscode.Terminal
   sessionId: string
+  /** Runs `claude attach` in a loop that outlives the session, waiting on Enter to attach again. */
+  looped: boolean
 }
+
+/**
+ * `claude attach` ends when its session stops — as it does once its task is
+ * done. In a loop the tab stays, with the whole conversation in it, and Enter
+ * attaches again; the queue presses it when it starts the session again.
+ */
+const ATTACH_LOOP =
+  'while :; do "$0" attach "$1"; ' +
+  'printf "\\n\\033[2m— the session has stopped. Press Enter to attach again, or close this tab.\\033[0m\\n"; ' +
+  'read -r _ || exit 0; done'
 
 /**
  * One VS Code terminal per task, running `claude attach` on the task's
@@ -48,8 +60,21 @@ export class SessionTerminals implements vscode.Disposable {
    * terminal is opened in the background as it starts, and brought forward —
    * without taking the keyboard — when it waits on a person.
    */
-  onSession(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string; attention: boolean }): void {
+  onSession(e: {
+    planPath: string
+    taskId: string
+    title: string
+    sessionId: string
+    cwd: string
+    attention: boolean
+    launched: boolean
+  }): void {
     const mode = this.mode()
+    const had = this.open.get(`${e.planPath}#${e.taskId}`)
+    // Started again after it stopped: its tab, waiting in the loop, attaches again in place.
+    if (e.launched && had?.looped && had.sessionId === e.sessionId && had.terminal.exitStatus === undefined) {
+      had.terminal.sendText('', true)
+    }
     if (mode === 'never' || (mode === 'whenNeeded' && !e.attention)) return
     const t = this.ensure(e)
     if (e.attention) t.show(true)
@@ -88,20 +113,23 @@ export class SessionTerminals implements vscode.Disposable {
   private ensure(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string }): vscode.Terminal {
     const key = `${e.planPath}#${e.taskId}`
     const had = this.open.get(key)
-    // `claude attach` ends when its session is stopped; a resumed session needs a fresh one.
+    // The same session's tab is kept; another run of the task gets a tab of its own.
     if (had && had.sessionId === e.sessionId && had.terminal.exitStatus === undefined) return had.terminal
     had?.terminal.dispose()
+    // No sh on Windows: there the tab closes with the session.
+    const looped = process.platform !== 'win32'
     const terminal = vscode.window.createTerminal({
       name: `${e.taskId} · ${e.title}`,
-      shellPath: this.claudePath(),
-      shellArgs: ['attach', shortId(e.sessionId)],
+      ...(looped
+        ? { shellPath: '/bin/sh', shellArgs: ['-c', ATTACH_LOOP, this.claudePath(), shortId(e.sessionId)] }
+        : { shellPath: this.claudePath(), shellArgs: ['attach', shortId(e.sessionId)] }),
       cwd: e.cwd,
       iconPath: new vscode.ThemeIcon('hubot'),
       location: this.location(),
       // A reload restores nothing: the queue opens what it still runs.
       isTransient: true,
     })
-    this.open.set(key, { terminal, sessionId: e.sessionId })
+    this.open.set(key, { terminal, sessionId: e.sessionId, looped })
     return terminal
   }
 

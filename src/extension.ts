@@ -43,6 +43,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       sessionId: e.sessionId,
       cwd: e.cwd,
       attention: e.attention,
+      launched: e.launched ?? false,
     }),
   )
   const trustEvents = queue.onTrust((e) => terminals.trust(e.cwd, e.needed))
@@ -166,7 +167,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void vscode.window.showInformationMessage(`Plan Queue — ${taskId} is not waiting for a reply.`)
       return
     }
-    queue.showLog(planPath)
     const gist = (st.question ?? '')
       .split('\n')
       .map((l) => l.trim())
