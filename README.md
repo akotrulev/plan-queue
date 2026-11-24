@@ -92,9 +92,16 @@ turn ended, follows up, and stops it.
   task (`T3 · Orders API`) opens as an editor tab beside your files — as the
   Claude Code extension opens a session — without taking the keyboard, running
   `claude attach <session>`: the full Claude Code UI on that session. When the
-  task needs you, its tab is brought forward. When the task is done its session
-  stops, but the tab stays and shows the task's transcript — what it said, the
-  tools it ran, how it ended; Enter attaches again, and the queue does that itself when it resumes the same session.
+  task needs you, its tab is brought forward. When a task **passes**, its
+  session is stopped and its tab closes. When one **fails or is blocked**, its
+  tab stays and attaches again — which wakes the stopped session — so the whole
+  conversation is there to review in Claude Code itself; closing the tab stops
+  the session again, and so does running the task again. While a session is
+  stopped mid-plan (paused, or between the queue's follow-ups) its tab shows the
+  task's transcript, and re-attaches by itself when the queue resumes it.
+- **Clicking a task** that is running, waiting, blocked or failed opens its
+  session's tab (a failed one woken for review); clicking any other task opens
+  its prompt in the plan, which the task's inline button does for every task.
   `planQueue.sessionTerminalLocation` puts them in the terminal panel instead. Closing the terminal leaves
   the session running; *Open the task's session* (the terminal button on a
   running task, or right-click) opens it again. `planQueue.sessionTerminals`

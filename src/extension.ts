@@ -50,6 +50,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   )
   const trustEvents = queue.onTrust((e) => terminals.trust(e.cwd, e.needed))
+  const endEvents = queue.onTaskEnded((e) =>
+    terminals.ended({
+      planPath: e.planPath,
+      taskId: e.task.id,
+      title: e.task.title,
+      sessionId: e.sessionId,
+      cwd: e.cwd,
+      ok: e.ok,
+    }),
+  )
 
   const backlogLog = vscode.window.createOutputChannel('Plan Queue — backlog')
   const backlog = new BacklogRunner(state, queue, tree, backlogLog)
@@ -150,9 +160,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const openSession = async (planPath: string, taskId: string, title?: string) => {
     const st = state.get(planPath, taskId)
     const cwd = cwdOf(planPath)
+    const name = title ?? queue.liveTasks(planPath).find((l) => l.task.id === taskId)?.task.title ?? ''
     if (st.sessionId && cwd && (await liveSession(readConfig().claudePath, cwd, st.sessionId))) {
-      const name = title ?? queue.liveTasks(planPath).find((l) => l.task.id === taskId)?.task.title ?? ''
       terminals.show({ planPath, taskId, title: name, sessionId: st.sessionId, cwd })
+      return
+    }
+    if (st.sessionId && cwd && (st.status === 'blocked' || st.status === 'failed')) {
+      // Stopped when it failed: woken in its tab, to look through.
+      terminals.review({ planPath, taskId, title: name, sessionId: st.sessionId, cwd }, true)
       return
     }
     if (st.status === 'waiting') {
@@ -193,6 +208,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     terminals,
     sessionEvents,
     trustEvents,
+    endEvents,
     backlog,
     backlogLog,
     server,

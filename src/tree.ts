@@ -178,11 +178,12 @@ Branch: ${wt.branch}, merges into ${wt.base}`
         .filter(Boolean)
         .join('\n\n'),
     )
-    item.command = {
-      command: 'planQueue.openPrompt',
-      title: 'Open the prompt in the plan',
-      arguments: [node],
-    }
+    // A task with a session to look at opens it; any other opens its prompt,
+    // which the inline button does for every task.
+    const hasSession = st.sessionId !== undefined && ['running', 'waiting', 'blocked', 'failed'].includes(st.status)
+    item.command = hasSession
+      ? { command: 'planQueue.openSession', title: "Open the task's session", arguments: [node] }
+      : { command: 'planQueue.openPrompt', title: 'Open the prompt in the plan', arguments: [node] }
     return item
   }
 

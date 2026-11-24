@@ -223,6 +223,15 @@ export class Queue implements vscode.Disposable {
   private readonly sessionEvent = new vscode.EventEmitter<SessionEvent>()
   /** Fires when a task's session comes up, and again when it needs a person. */
   readonly onSession = this.sessionEvent.event
+  private readonly taskEnded = new vscode.EventEmitter<{
+    planPath: string
+    task: Task
+    sessionId: string
+    cwd: string
+    ok: boolean
+  }>()
+  /** Fires when a task is done or blocked for good, with its last session. */
+  readonly onTaskEnded = this.taskEnded.event
   private readonly trustEvent = new vscode.EventEmitter<{ cwd: string; needed: boolean }>()
   /** Fires when a folder needs trusting in Claude Code before a session can start there, and once it no longer does. */
   readonly onTrust = this.trustEvent.event
@@ -636,6 +645,7 @@ export class Queue implements vscode.Disposable {
     this.planStopped.dispose()
     this.sessionEvent.dispose()
     this.trustEvent.dispose()
+    this.taskEnded.dispose()
     for (const out of this.channels.values()) out.dispose()
   }
 
@@ -1043,6 +1053,8 @@ export class Queue implements vscode.Disposable {
       }
 
       const cfg = readConfig()
+      // A fresh start leaves the last run's session behind: one kept up for review after it failed.
+      if (!resume && before.sessionId) forgetSession(cfg.claudePath, before.sessionId, run.cwd)
       await this.state.set(planPath, task.id, {
         status: 'running',
         reason: undefined,
@@ -1258,6 +1270,9 @@ export class Queue implements vscode.Disposable {
       await this.changed()
       run.ran++
       if (ok && result.sessionId) forgetSession(cfg.claudePath, result.sessionId, run.cwd)
+      if (result.sessionId) {
+        this.taskEnded.fire({ planPath, task, sessionId: result.sessionId, cwd: run.cwd, ok })
+      }
 
       if (!ok) {
         await this.leaveBehind(run, live, out)

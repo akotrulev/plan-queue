@@ -1,4 +1,5 @@
 import * as vscode from 'vscode'
+import { stopSession } from './runner'
 import { shortId } from './session'
 
 /** When a task's session gets a terminal of its own. */
@@ -9,6 +10,8 @@ interface Open {
   sessionId: string
   /** Runs `claude attach` in a loop that outlives the session, waiting on Enter to attach again. */
   looped: boolean
+  /** Woken after its task failed, for review: closing the tab stops the session again. */
+  review?: { cwd: string }
 }
 
 /**
@@ -41,7 +44,11 @@ export class SessionTerminals implements vscode.Disposable {
     private readonly logFile: (planPath: string, taskId: string) => string | undefined,
   ) {
     this.closing = vscode.window.onDidCloseTerminal((t) => {
-      for (const [key, o] of this.open) if (o.terminal === t) this.open.delete(key)
+      for (const [key, o] of this.open) {
+        if (o.terminal !== t) continue
+        this.open.delete(key)
+        if (o.review) stopSession(this.claudePath(), shortId(o.sessionId), o.review.cwd)
+      }
       for (const [cwd, o] of this.trusting) if (o === t) this.trusting.delete(cwd)
     })
   }
@@ -111,6 +118,43 @@ export class SessionTerminals implements vscode.Disposable {
     terminal.show(false)
   }
 
+  /**
+   * The task is over. One that passed has nothing left to look at: its tab
+   * closes. One that failed keeps its tab, attached again — which wakes its
+   * stopped session — so the whole conversation is there to review, in Claude
+   * Code itself; closing the tab stops it again.
+   */
+  ended(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string; ok: boolean }): void {
+    const key = `${e.planPath}#${e.taskId}`
+    const had = this.open.get(key)
+    if (e.ok) {
+      had?.terminal.dispose()
+      this.open.delete(key)
+      return
+    }
+    if (this.mode() === 'never' && !had) return
+    this.review(e, false)
+  }
+
+  /** A failed task's stopped session, woken in its tab to look through. */
+  review(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string }, focus: boolean): void {
+    const had = this.open.get(`${e.planPath}#${e.taskId}`)
+    if (had?.looped && had.sessionId === e.sessionId && had.terminal.exitStatus === undefined) {
+      // Already reviewing: just show it. Otherwise the loop is waiting on Enter
+      // once `claude attach` has finished exiting.
+      if (!had.review) {
+        had.review = { cwd: e.cwd }
+        setTimeout(() => had.terminal.sendText('', true), 1500)
+      }
+      had.terminal.show(!focus)
+      return
+    }
+    const t = this.ensure(e)
+    const now = this.open.get(`${e.planPath}#${e.taskId}`)
+    if (now) now.review = { cwd: e.cwd }
+    t.show(!focus)
+  }
+
   /** Open the task's session in a terminal and put the cursor in it. */
   show(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string }): void {
     this.ensure(e).show(false)
@@ -151,5 +195,9 @@ export class SessionTerminals implements vscode.Disposable {
 
   dispose(): void {
     this.closing.dispose()
+    // Sessions woken for review outlive the window otherwise.
+    for (const o of this.open.values()) {
+      if (o.review) stopSession(this.claudePath(), shortId(o.sessionId), o.review.cwd)
+    }
   }
 }

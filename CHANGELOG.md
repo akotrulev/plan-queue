@@ -11,8 +11,13 @@
   `planQueue.sessionTerminals` (`onStart`, `whenNeeded`, `never`) sets when a
   terminal opens by itself. It opens as an editor tab beside your files, as the
   Claude Code extension opens a session; `planQueue.sessionTerminalLocation`
-  puts it in the terminal panel instead. A finished task's tab stays open and shows
-  the task's transcript, and re-attaches in place when the queue resumes the session.
+  puts it in the terminal panel instead. A task that passes closes its tab; one
+  that fails or is blocked keeps it, attached to its woken session, so the whole
+  conversation can be reviewed in Claude Code — closing the tab stops it. A
+  stopped session's tab shows the task's transcript and re-attaches in place
+  when the queue resumes it.
+- Clicking a running, waiting, blocked or failed task opens its session's tab;
+  any other task opens its prompt, and the inline button still does for all.
 - The plan's output channel no longer opens when a plan starts, unless
   `planQueue.sessionTerminals` is `never`; *Show the log* still opens it.
 - **Questions are answered in the session.** A task that ends on
