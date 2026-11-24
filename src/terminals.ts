@@ -16,11 +16,14 @@ interface Open {
  */
 export class SessionTerminals implements vscode.Disposable {
   private readonly open = new Map<string, Open>()
+  /** `claude` run in a folder that Claude Code has not trusted yet, keyed by folder. */
+  private readonly trusting = new Map<string, vscode.Terminal>()
   private readonly closing: vscode.Disposable
 
   constructor(private readonly claudePath: () => string) {
     this.closing = vscode.window.onDidCloseTerminal((t) => {
       for (const [key, o] of this.open) if (o.terminal === t) this.open.delete(key)
+      for (const [cwd, o] of this.trusting) if (o === t) this.trusting.delete(cwd)
     })
   }
 
@@ -38,6 +41,30 @@ export class SessionTerminals implements vscode.Disposable {
     if (mode === 'never' || (mode === 'whenNeeded' && !e.attention)) return
     const t = this.ensure(e)
     if (e.attention) t.show(true)
+  }
+
+  /**
+   * Claude Code starts a background session only in a folder it trusts. While
+   * one is needed, a terminal runs `claude` there, where its trust prompt is
+   * answered; it is closed once the session has started.
+   */
+  trust(cwd: string, needed: boolean): void {
+    const had = this.trusting.get(cwd)
+    if (!needed) {
+      had?.dispose()
+      this.trusting.delete(cwd)
+      return
+    }
+    if (had && had.exitStatus === undefined) return had.show(false)
+    const terminal = vscode.window.createTerminal({
+      name: `Trust · ${cwd.split(/[\\/]/).pop()}`,
+      shellPath: this.claudePath(),
+      cwd,
+      iconPath: new vscode.ThemeIcon('shield'),
+      isTransient: true,
+    })
+    this.trusting.set(cwd, terminal)
+    terminal.show(false)
   }
 
   /** Open the task's session in a terminal and put the cursor in it. */

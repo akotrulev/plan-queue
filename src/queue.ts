@@ -220,6 +220,9 @@ export class Queue implements vscode.Disposable {
   private readonly sessionEvent = new vscode.EventEmitter<SessionEvent>()
   /** Fires when a task's session comes up, and again when it needs a person. */
   readonly onSession = this.sessionEvent.event
+  private readonly trustEvent = new vscode.EventEmitter<{ cwd: string; needed: boolean }>()
+  /** Fires when a folder needs trusting in Claude Code before a session can start there, and once it no longer does. */
+  readonly onTrust = this.trustEvent.event
   private readonly planStopped = new vscode.EventEmitter<string[]>()
   /** Fires with the plans a person stopped or paused, so nothing restarts them by itself. */
   readonly onPlanStopped = this.planStopped.event
@@ -629,6 +632,7 @@ export class Queue implements vscode.Disposable {
     this.runStarted.dispose()
     this.planStopped.dispose()
     this.sessionEvent.dispose()
+    this.trustEvent.dispose()
     for (const out of this.channels.values()) out.dispose()
   }
 
@@ -1053,6 +1057,7 @@ export class Queue implements vscode.Disposable {
           this.sessionEvent.fire({ planPath, task, sessionId: id, cwd: run.cwd, attention: false })
         },
         onBlocked: (question) => void this.setBlocked(run, live, question),
+        onUntrusted: (cwd) => void this.setUntrusted(run, live, cwd),
       })
       if (live.pausing) live.handle.pause()
       const result = await live.handle.result
@@ -1465,6 +1470,25 @@ export class Queue implements vscode.Disposable {
       .then((pick) => {
         if (pick) void vscode.commands.executeCommand('planQueue.openSession', { planPath: run.planPath, taskId: task.id })
       })
+  }
+
+  /** The task's folder is not trusted in Claude Code yet: it waits on the person to trust it. */
+  private async setUntrusted(run: Run, live: Live, cwd: string | undefined): Promise<void> {
+    const { task } = live
+    live.blocked = cwd !== undefined
+    await this.state.set(
+      run.planPath,
+      task.id,
+      cwd === undefined
+        ? { status: 'running', reason: undefined, question: undefined }
+        : {
+            status: 'waiting',
+            reason: 'trust its folder in Claude Code',
+            question: `Claude Code has not trusted ${cwd} yet. Accept the trust prompt in the terminal Plan Queue opened there, and the task starts.`,
+          },
+    )
+    await this.changed()
+    this.trustEvent.fire({ cwd: cwd ?? run.cwd, needed: cwd !== undefined })
   }
 
   /**

@@ -123,6 +123,11 @@ export interface TaskRunOptions {
    * once it carries on.
    */
   onBlocked?: (question: string | undefined) => void
+  /**
+   * Claude Code will not start a session in this folder until a person
+   * accepts its trust prompt there; undefined once it has started.
+   */
+  onUntrusted?: (cwd: string | undefined) => void
 }
 
 export interface RunConfig {
@@ -323,6 +328,9 @@ export async function answeredInSession(
   return undefined
 }
 
+/** `claude --bg` refused the folder: it has not been trusted in Claude Code. */
+const untrusted = (r: { stdout: string; stderr: string }) => /workspace not trusted/i.test(`${r.stdout}\n${r.stderr}`)
+
 export function runTask(
   task: Task,
   cfg: RunConfig,
@@ -426,7 +434,32 @@ export function runTask(
       }
       // `--` ends the variadic --allowedTools; the prompt is the positional after it.
       args.push('--', prompt)
-      const launched = await cli(cfg.claudePath, args, cwd, 120_000)
+      let launched = await cli(cfg.claudePath, args, cwd, 120_000)
+      if (untrusted(launched)) {
+        // Claude Code runs a background session only in a folder it trusts — a
+        // new plan worktree is not one yet. A refused start costs nothing, so it
+        // is tried again until the person accepts the trust prompt.
+        flush()
+        out.appendLine(`  Claude Code does not trust ${cwd} yet: accept its trust prompt in the terminal that opened.`)
+        opts.onUntrusted?.(cwd)
+        while (untrusted(launched)) {
+          await new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, 3000)
+            wake = () => {
+              clearTimeout(t)
+              resolve()
+            }
+          })
+          wake = undefined
+          if (cancelled || paused) {
+            opts.onUntrusted?.(undefined)
+            const r = { durationMs: Date.now() - started, sessionId, denied: [] as string[] }
+            return cancelled ? { ...r, ok: false, cancelled: true, reason: 'cancelled' } : { ...r, ok: false, paused: true, reason: 'paused' }
+          }
+          launched = await cli(cfg.claudePath, args, cwd, 120_000)
+        }
+        opts.onUntrusted?.(undefined)
+      }
       short = parseBackgrounded(`${launched.stdout}\n${launched.stderr}`)
       if (!short) {
         const reason =

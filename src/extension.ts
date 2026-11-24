@@ -45,6 +45,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       attention: e.attention,
     }),
   )
+  const trustEvents = queue.onTrust((e) => terminals.trust(e.cwd, e.needed))
 
   const backlogLog = vscode.window.createOutputChannel('Plan Queue — backlog')
   const backlog = new BacklogRunner(state, queue, tree, backlogLog)
@@ -188,6 +189,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     queue,
     terminals,
     sessionEvents,
+    trustEvents,
     backlog,
     backlogLog,
     server,
