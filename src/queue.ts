@@ -783,7 +783,7 @@ export class Queue implements vscode.Disposable {
     this.lastChannel = run.out
     await this.changed()
     // The tasks' own tabs show what they do; the log comes forward only without them.
-    if (vscode.workspace.getConfiguration('planQueue').get<string>('sessionTerminals', 'onStart') === 'never') {
+    if (vscode.workspace.getConfiguration('planQueue').get<string>('sessionTerminals', 'whenNeeded') === 'never') {
       run.out.show(true)
     }
 

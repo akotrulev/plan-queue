@@ -54,7 +54,7 @@ export class SessionTerminals implements vscode.Disposable {
   }
 
   private mode(): Mode {
-    return vscode.workspace.getConfiguration('planQueue').get<Mode>('sessionTerminals', 'onStart')
+    return vscode.workspace.getConfiguration('planQueue').get<Mode>('sessionTerminals', 'whenNeeded')
   }
 
   /**

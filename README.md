@@ -88,28 +88,30 @@ you can open it in a terminal, watch it work, answer its prompts and type into
 it, while the queue drives it — starts it with the task's prompt, judges how its
 turn ended, follows up, and stops it.
 
-- **A tab per task.** As a task's session starts, a terminal named after the
-  task (`T3 · Orders API`) opens as an editor tab beside your files — as the
-  Claude Code extension opens a session — running `claude attach <session>`:
-  the full Claude Code UI on that session. It opens **behind** the tab you are
-  on: the session you are reading or typing into stays in view, and so does
-  any file. Nothing switches tabs by itself; a task that needs you says so in
-  the tree, the status bar and a notification, and its tab is one click away.
-  When a task **passes**, its
-  session is stopped and its tab closes. When one **fails or is blocked**, its
-  tab stays and attaches again — which wakes the stopped session — so the whole
-  conversation is there to review in Claude Code itself; closing the tab stops
-  the session again, and so does running the task again. While a session is
-  stopped mid-plan (paused, or between the queue's follow-ups) its tab shows the
-  task's transcript, and re-attaches by itself when the queue resumes it.
-- **Clicking a task** brings its session's tab forward while one is open, and
-  otherwise opens its prompt in the plan, which the task's inline button does
-  for every task. *Open the task's session* (right-click) opens a tab when
-  there is none, waking a failed task's session for review.
-  `planQueue.sessionTerminalLocation` puts them in the terminal panel instead. Closing the terminal leaves
-  the session running; *Open the task's session* (the terminal button on a
-  running task, or right-click) opens it again. `planQueue.sessionTerminals`
-  chooses `onStart` (default), `whenNeeded` or `never`.
+- **A tab per task, when it matters.** A task's session opens as an editor tab
+  beside your files — as the Claude Code extension opens a session — named
+  after the task (`T3 · Orders API`) and running `claude attach <session>`: the
+  full Claude Code UI on that session. By default a tab opens only when the
+  task **asks you something**, when it **fails or is blocked**, or when **you
+  click it**. Tabs the queue opens open **behind** the one you are on: the
+  session you are reading or typing into stays in view. A task that needs you
+  also says so in the tree, the status bar and a notification.
+- **Clicking a task** brings its tab forward when it has one open, opens its
+  session when it has one (running, waiting, blocked or failed), and otherwise
+  opens its prompt in the plan — which the task's inline button does for every
+  task.
+- **When a task passes**, its session is stopped and its tab closes. **When one
+  fails or is blocked**, its tab stays and attaches again — which wakes the
+  stopped session — so the whole conversation is there to review in Claude
+  Code itself; closing the tab stops the session again, and so does running the
+  task again. While a session is stopped mid-plan (paused, or between the
+  queue's follow-ups) its tab shows the task's transcript, and re-attaches by
+  itself when the queue resumes it. Closing a running task's tab leaves its
+  session running.
+- `planQueue.sessionTerminals` chooses when tabs open by themselves:
+  `whenNeeded` (default), `onStart` (every task as it starts) or `never`.
+  `planQueue.sessionTerminalLocation` puts them in the terminal panel instead
+  of the editor.
 - The queue watches the session through `claude agents --json` and reads its
   transcript, so the plan's log still shows what it says and the tools it calls.
 
@@ -563,7 +565,7 @@ ceiling: `--max-budget-usd` works only with `claude -p`, so
 | `planQueue.claudePath` | `claude` | Path to the CLI |
 | `planQueue.model` | — | `--model` for every task |
 | `planQueue.permissionMode` | `acceptEdits` | `--permission-mode` each session starts with |
-| `planQueue.sessionTerminals` | `onStart` | When a task's session gets a terminal: `onStart`, `whenNeeded`, `never` |
+| `planQueue.sessionTerminals` | `whenNeeded` | When a task's tab opens by itself: `whenNeeded` (a question or a failure), `onStart`, `never` |
 | `planQueue.sessionTerminalLocation` | `editor` | Where it opens: an editor tab, or the terminal `panel` |
 | `planQueue.allowedTools` | a working set | Commands allowed without a prompt |
 | `planQueue.gateCommand` | — | Shell check after each task |

@@ -157,7 +157,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
    * answer it or just watch. A waiting task whose session is gone gets the
    * reply box instead, which resumes the session with the answer.
    */
-  const openSession = async (planPath: string, taskId: string, title?: string) => {
+  const openSession = async (
+    planPath: string,
+    taskId: string,
+    title?: string,
+    /** What to do when there is no session to open; by default, say so. */
+    otherwise?: () => Thenable<unknown>,
+  ) => {
     const st = state.get(planPath, taskId)
     const cwd = cwdOf(planPath)
     const name = title ?? queue.liveTasks(planPath).find((l) => l.task.id === taskId)?.task.title ?? ''
@@ -168,6 +174,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (st.sessionId && cwd && (st.status === 'blocked' || st.status === 'failed')) {
       // Stopped when it failed: woken in its tab, to look through.
       terminals.review({ planPath, taskId, title: name, sessionId: st.sessionId, cwd }, true)
+      return
+    }
+    if (otherwise) {
+      await otherwise()
       return
     }
     if (st.status === 'waiting') {
@@ -551,9 +561,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('planQueue.clickTask', async (node?: Node) => {
       const t = asTask(node)
       if (!t) return
-      if (!terminals.reveal(t.plan.path, t.task.id)) {
-        await vscode.commands.executeCommand('planQueue.openPrompt', node)
-      }
+      // Its tab when open; else its session, when it has one to look at; else its prompt.
+      if (terminals.reveal(t.plan.path, t.task.id)) return
+      const openPrompt = () => vscode.commands.executeCommand('planQueue.openPrompt', node)
+      const st = state.get(t.plan.path, t.task.id)
+      if (st.sessionId && ['running', 'waiting', 'blocked', 'failed'].includes(st.status)) {
+        await openSession(t.plan.path, t.task.id, t.task.title, openPrompt)
+      } else await openPrompt()
     }),
 
     vscode.commands.registerCommand('planQueue.openPrompt', async (node?: Node) => {

@@ -645,10 +645,10 @@
           ],
           "enumDescriptions": [
             "Open a tab on each task's session as it starts, behind the tab you are looking at.",
-            "Open a task's terminal only once it needs you: a question, or a prompt in its session.",
-            "Never open one by itself; use \"Open the task's session\"."
+            "Open a task's tab only when it needs you (a question, or a prompt in its session) or has failed, behind the tab you are looking at. Click a task to open its session any time.",
+            "Never open one by itself; click a task, or use \"Open the task's session\"."
           ],
-          "default": "onStart",
+          "default": "whenNeeded",
           "description": "Each task runs as a Claude Code background session; its terminal runs `claude attach` on it, the full Claude Code UI. Closing the terminal leaves the session running."
         },
         "planQueue.sessionTerminalLocation": {
