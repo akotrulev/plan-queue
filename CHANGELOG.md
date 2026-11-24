@@ -19,6 +19,10 @@
   `PLAN_QUEUE: QUESTION` keeps its session up, its terminal comes forward, and
   the queue carries on once you answer there. *Reply*, `pq reply` and the MCP
   `reply` tool still work: they resume the session with the answer.
+- **Questions come with options.** A task that needs you asks with Claude
+  Code's question picker, offering the likely answers; you pick one in its tab
+  and it carries on. The question and its options show in the tree, the
+  notification and the log. `PLAN_QUEUE: QUESTION` stays as the fallback.
 - **A session that stops on a prompt mid-turn** shows as
   `waiting · needs you in its session` until you answer it.
 - **Commands not on the allowlist ask instead of being denied.** The task waits

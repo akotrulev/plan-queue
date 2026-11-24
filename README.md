@@ -202,11 +202,14 @@ none when asked. Instead of failing, the task goes to **waiting for reply**:
 - Stopping the plan, or closing the window, leaves the task waiting, and its
   session up. Answer it later and the plan starts again from that task.
 
-A session can also stop **mid-turn** on something only a person can answer in
-it — a permission prompt for a command that is not on the allowlist, or a
-question asked with Claude Code's own question picker. The task shows as
-`waiting · needs you in its session`, its terminal comes forward, and once you
-answer there it goes back to working.
+A task that needs you asks with Claude Code's own question picker
+(`AskUserQuestion`), offering the likely answers as options — the appended
+system prompt tells it to, and keeps `PLAN_QUEUE: QUESTION` for when that tool
+is not there. The session stops **mid-turn** on it, as it does on a permission
+prompt for a command that is not on the allowlist. The task shows as
+`waiting · needs you in its session`, with the question and its options in the
+tooltip and the notification; its tab comes forward, you pick an option (or
+type your own) there, and the task goes back to working.
 - Cost and duration add up across the turns of a task.
 
 With `planQueue.requireSentinel` off, a turn that ends cleanly is done, so a

@@ -87,6 +87,20 @@ export type TranscriptEvent =
   /** The turn ended: Claude Code wrote its turn summary. */
   | { kind: 'turnEnd' }
 
+/** An AskUserQuestion call as plain text: each question, then its options. */
+export function askText(input: unknown): string {
+  const qs = (input as { questions?: unknown })?.questions
+  if (!Array.isArray(qs)) return 'It is asking you something in its session.'
+  return qs
+    .map((q) => {
+      const options = Array.isArray(q?.options)
+        ? q.options.map((o: { label?: unknown }) => String(o?.label ?? '')).filter(Boolean)
+        : []
+      return `${String(q?.question ?? '')}${options.length ? `\n  — ${options.join(' / ')}` : ''}`
+    })
+    .join('\n')
+}
+
 /** Text of a tool result or message content, wherever it sits. */
 export function contentText(content: unknown): string {
   if (typeof content === 'string') return content
@@ -108,6 +122,9 @@ export class TranscriptReader {
   private lastText = ''
   /** The last assistant message was an API error the CLI wrote in place of a reply. */
   lastIsError = false
+  /** An AskUserQuestion the session is showing and nobody has answered yet, as text. */
+  pendingAsk: string | undefined
+  private pendingAskId: string | undefined
   /** `totalCostUSD` of the last cost-state line read. */
   costUsd: number | undefined
 
@@ -187,6 +204,10 @@ export class TranscriptReader {
           events.push({ kind: 'thinking', text: b.thinking })
         } else if (b?.type === 'tool_use') {
           events.push({ kind: 'tool', name: String(b.name ?? ''), input: b.input })
+          if (b.name === 'AskUserQuestion') {
+            this.pendingAsk = askText(b.input)
+            this.pendingAskId = b.id
+          }
         }
       }
     } else if (msg.type === 'user' && !msg.isSidechain && !msg.isMeta) {
@@ -196,6 +217,10 @@ export class TranscriptReader {
         if (content.trim() && !content.trimStart().startsWith('<')) events.push({ kind: 'prompt', text: content })
       } else if (Array.isArray(content)) {
         for (const b of content) {
+          if (b?.type === 'tool_result' && this.pendingAskId !== undefined && b.tool_use_id === this.pendingAskId) {
+            this.pendingAsk = undefined
+            this.pendingAskId = undefined
+          }
           if (b?.type === 'tool_result' && b.is_error) {
             events.push({ kind: 'toolError', text: contentText(b.content) })
           } else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim() && !b.text.trimStart().startsWith('<')) {

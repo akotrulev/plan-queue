@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { parseAgents, parseBackgrounded, shortId, TranscriptReader, transcriptPath } from '../out/session.mjs'
+import { askText, parseAgents, parseBackgrounded, shortId, TranscriptReader, transcriptPath } from '../out/session.mjs'
 
 const line = (o) => JSON.stringify(o)
 const assistant = (id, content, extra = {}) => line({ type: 'assistant', isSidechain: false, message: { id, role: 'assistant', content }, ...extra })
@@ -115,4 +115,21 @@ test('the transcript is found under the cwd\'s project folder, or any project fo
   assert.equal(transcriptPath('/somewhere/else', sid, config), path.join(proj, `${sid}.jsonl`))
   assert.equal(transcriptPath('/x', 'nope', config), undefined)
   fs.rmSync(config, { recursive: true })
+})
+
+test('an AskUserQuestion is pending until its result comes back, as plain text with its options', () => {
+  const r = new TranscriptReader(() => undefined)
+  const input = {
+    questions: [
+      { question: 'Which colour do you prefer?', header: 'Colour', options: [{ label: 'Red' }, { label: 'Green' }, { label: 'Blue' }] },
+    ],
+  }
+  r.take(assistant('m1', [{ type: 'tool_use', id: 'tu1', name: 'AskUserQuestion', input }]))
+  assert.equal(r.pendingAsk, 'Which colour do you prefer?\n  — Red / Green / Blue')
+  r.take(user([{ type: 'tool_result', tool_use_id: 'other', content: 'x' }]))
+  assert.ok(r.pendingAsk)
+  r.take(user([{ type: 'tool_result', tool_use_id: 'tu1', content: 'Your questions have been answered: "Which colour do you prefer?"="Red".' }]))
+  assert.equal(r.pendingAsk, undefined)
+  assert.equal(askText({}), 'It is asking you something in its session.')
+  assert.equal(askText({ questions: [{ question: 'Go?' }] }), 'Go?')
 })

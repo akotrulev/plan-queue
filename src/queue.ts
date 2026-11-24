@@ -1385,6 +1385,11 @@ export class Queue implements vscode.Disposable {
     if (existing) {
       const { created } = await ensureWorktree(existing.repo, existing)
       out.appendLine(`=== ${run.title}: resuming in ${existing.dir} (${existing.branch})`)
+      if (!existing.dir.split(path.sep).join('/').includes('/.claude/worktrees/')) {
+        out.appendLine(
+          '  note: this worktree is not under a .claude/worktrees folder, so Claude Code moves each task\'s edits into a worktree of its own. Discard it (right-click the plan) to have it made again there.',
+        )
+      }
       // Its folder was deleted and has just been checked out again, bare.
       if (created) await this.setUp(run, existing)
       return existing

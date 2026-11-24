@@ -27,9 +27,10 @@ const SESSION_NOTE = [
   `End your final message with a line that is exactly "${SENTINEL_OK}" when the task's work`,
   `landed, or "${SENTINEL_BAD} <one-line reason>" only when the work cannot go on at all`,
   '(a merge conflict, a missing dependency or credential) — never because a test is red.',
-  'Only when you genuinely cannot go on without a person, end your message with the question',
-  `and then a line that is exactly "${SENTINEL_ASK}": the queue pauses this task and brings`,
-  'the answer back to this session.',
+  'Only when you genuinely cannot go on without a person, ask with the AskUserQuestion tool,',
+  'offering the likely answers as options: the person picks one in this session and you carry on.',
+  'If that tool is not available, end your message with the question and then a line that is',
+  `exactly "${SENTINEL_ASK}": the queue pauses this task and brings the answer back to this session.`,
 ].join(' ')
 
 /**
@@ -563,7 +564,9 @@ export function runTask(
             blocked = true
             flush()
             out.appendLine(`  … waiting on you in its session (claude attach ${short})`)
-            opts.onBlocked?.(reader.finalText.trim() || 'It is waiting on a permission prompt or a question in its session.')
+            opts.onBlocked?.(
+              reader.pendingAsk ?? (reader.finalText.trim() || 'It is waiting on a permission prompt in its session.'),
+            )
           } else if (entry.state === 'working' && blocked) {
             blocked = false
             opts.onBlocked?.(undefined)

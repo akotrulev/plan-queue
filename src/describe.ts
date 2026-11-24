@@ -40,6 +40,11 @@ export function toolSummary(name: string, input: any, cwd: string): string {
       return `${name} ${clip(String(i.description ?? i.subagent_type ?? ''), 100)}`
     case 'TodoWrite':
       return 'TodoWrite'
+    case 'AskUserQuestion': {
+      const q = Array.isArray(i.questions) ? i.questions[0] : undefined
+      const opts = Array.isArray(q?.options) ? q.options.map((o: any) => o?.label).filter(Boolean).join(' / ') : ''
+      return `asks: ${clip(String(q?.question ?? ''), 100)}${opts ? ` (${clip(opts, 80)})` : ''}`
+    }
     default: {
       const json = JSON.stringify(i)
       return json && json !== '{}' ? `${name} ${clip(json, 120)}` : name
