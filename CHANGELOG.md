@@ -23,6 +23,15 @@
 - Messages to a working task go into its session by typing; *Message the
   running task* became *Open a running task's session*, and the MCP `message`
   tool only answers waiting tasks.
+- **Plan worktrees moved to `<repo>/.claude/worktrees/`.** A background session
+  that edits a checkout first moves itself into a worktree of its own, unless it
+  already runs under `.claude/worktrees/`; there it edits the plan's worktree,
+  which is also trusted along with the repository. The folder is kept out of
+  `git status` through `.git/info/exclude`. For the same reason
+  `planQueue.worktrees` can no longer be off in a git repository.
+- **A folder Claude Code has not trusted** no longer fails the task: it waits,
+  a terminal runs `claude` there for the trust prompt, and the task starts once
+  it is accepted.
 - **No longer applied:** `planQueue.budgetUsd` (`--max-budget-usd` works only
   with `-p`) and `planQueue.limitStartThreshold` (background sessions do not
   report how full a usage window is). Cost per task still shows, read from the

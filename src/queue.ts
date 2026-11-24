@@ -6,6 +6,7 @@ import {
   commitFile,
   currentBranch,
   ensureWorktree,
+  excludeLocally,
   isDirty,
   locatePlan,
   mergeBranch,
@@ -1383,12 +1384,17 @@ export class Queue implements vscode.Disposable {
       if (created) await this.setUp(run, existing)
       return existing
     }
-    if (!c.get<boolean>('worktrees', true)) return undefined
-
     const repo = await repoRoot(folder)
     if (!repo) {
       out.appendLine(`=== ${run.title}: not a git repository, running in the workspace`)
       return undefined
+    }
+    if (!c.get<boolean>('worktrees', true)) {
+      // A background session that edits a checkout moves itself into a worktree
+      // of its own first, so a task run in place would edit somewhere else.
+      throw new Error(
+        'planQueue.worktrees is off, but Claude Code background sessions isolate their edits in a worktree of their own, so tasks run in place would not change this folder. Turn planQueue.worktrees on.',
+      )
     }
     const relPlan = path.relative(repo, planPath)
     if (relPlan.startsWith('..') || path.isAbsolute(relPlan)) return undefined
@@ -1410,10 +1416,21 @@ export class Queue implements vscode.Disposable {
     }
 
     const slug = slugFor(relPlan)
-    const root =
-      c.get<string>('worktreeRoot', '').trim() ||
-      path.join(path.dirname(repo), `${path.basename(repo)}.plan-queue`)
-    const dir = path.resolve(repo, root, slug)
+    // Under .claude/worktrees/ a background session counts as isolated already
+    // and edits the plan's tree; anywhere else it moves itself to a worktree of
+    // its own. Inside the repo, the folder is also trusted along with it.
+    const custom = c.get<string>('worktreeRoot', '').trim()
+    const root = path.resolve(repo, custom || path.join('.claude', 'worktrees'))
+    const dir = path.join(root, custom ? slug : `plan-queue-${slug}`)
+    const inside = path.relative(repo, root)
+    if (!inside.startsWith('..') && !path.isAbsolute(inside)) {
+      await excludeLocally(repo, `/${inside.split(path.sep).join('/')}/`)
+    }
+    if (!dir.split(path.sep).join('/').includes('/.claude/worktrees/')) {
+      out.appendLine(
+        `  note: ${root} is not under a .claude/worktrees folder, so Claude Code will move each task's edits into a worktree of its own`,
+      )
+    }
     const wt: PlanWorktree = {
       dir,
       branch: `plan-queue/${slug}`,

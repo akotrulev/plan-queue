@@ -33,6 +33,20 @@ export async function repoRoot(dir: string): Promise<string | undefined> {
   return r.code === 0 && r.stdout ? path.resolve(r.stdout) : undefined
 }
 
+/**
+ * Keep a path out of `git status` in this clone only, through
+ * `.git/info/exclude`, which is never committed. `pattern` is a gitignore
+ * line, e.g. `/.claude/worktrees/`.
+ */
+export async function excludeLocally(repo: string, pattern: string): Promise<void> {
+  const common = await must(['rev-parse', '--git-common-dir'], repo)
+  const file = path.join(path.resolve(repo, common), 'info', 'exclude')
+  const text = await fs.readFile(file, 'utf8').catch(() => '')
+  if (text.split(/\r?\n/).some((l) => l.trim() === pattern)) return
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.appendFile(file, `${text && !text.endsWith('\n') ? '\n' : ''}${pattern}\n`)
+}
+
 /** The branch checked out in `dir`, or undefined on a detached HEAD. */
 export async function currentBranch(dir: string): Promise<string | undefined> {
   const r = await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], dir)

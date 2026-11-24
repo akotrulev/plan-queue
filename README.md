@@ -319,16 +319,24 @@ task done (or reset it) so the queue moves on. Sessions are named
 
 ## Parallel plans, in worktrees
 
-With `planQueue.worktrees` on (the default) and the workspace in a git
-repository, **each plan runs on a branch of its own in a worktree of its own**,
-so you can start several plans at once. Tasks within a plan run one after
+With the workspace in a git repository, **each plan runs on a branch of its
+own in a worktree of its own**, so you can start several plans at once.
+`planQueue.worktrees` has to stay on there: a Claude Code background session
+that edits a checkout first moves itself into a worktree of its own, so a task
+run in the workspace itself would not change it. Outside a git repository,
+plans run in the workspace, one at a time. Tasks within a plan run one after
 another unless they declare `Depends on:` (see above), since each normally
 builds on the one before.
 
 - The first run of a plan cuts `plan-queue/<plan>-<hash>` from the branch the
-  workspace is on and checks it out under `planQueue.worktreeRoot` (default: a
-  sibling folder, `<repo>.plan-queue/`). The plan has to be committed for its
-  worktree to see it; if it is not, you are asked whether to commit just that file.
+  workspace is on and checks it out under `planQueue.worktreeRoot` (default:
+  `<repo>/.claude/worktrees/plan-queue-<plan>-<hash>`). Under
+  `.claude/worktrees/`, Claude Code counts a session as isolated already, so the
+  task edits the plan's worktree itself; the folder is also trusted along with
+  the repository, and kept out of `git status` through `.git/info/exclude`. A
+  root elsewhere works, but each task's edits then land in a worktree Claude
+  Code makes for it. The plan has to be committed for its worktree to see it;
+  if it is not, you are asked whether to commit just that file.
 - `planQueue.worktreeSetupCommand` (e.g. `npm ci`) runs once in a new worktree,
   since it starts with only what is committed.
 - Every task that passes — sentinel and gate — is committed on the plan's branch.
@@ -554,8 +562,8 @@ ceiling: `--max-budget-usd` works only with `claude -p`, so
 | `planQueue.useAgentFromPlan` | `true` | Honour the heading's agent |
 | `planQueue.extraArgs` | `[]` | Extra arguments for the `claude --bg` that starts each session |
 | `planQueue.logThinking` | `false` | Include the model's thinking in the log |
-| `planQueue.worktrees` | `true` | One worktree and branch per plan, so plans run in parallel |
-| `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>.plan-queue/` beside the repo |
+| `planQueue.worktrees` | `true` | One worktree and branch per plan, so plans run in parallel; required in a git repository |
+| `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>/.claude/worktrees/` |
 | `planQueue.worktreeSetupCommand` | — | Run once in a new worktree, e.g. `npm ci` |
 | `planQueue.mergeWhenDone` | `true` | Merge the branch back when the plan is done |
 | `planQueue.startPlansAfterMerge` | `true` | Start the plans whose `Runs after:` names a plan that just merged |

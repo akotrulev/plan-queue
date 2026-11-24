@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'child_process'
+import * as fs from 'fs'
 import * as vscode from 'vscode'
 import type { Task } from './plan'
 
@@ -392,7 +393,12 @@ export function runTask(
 
     let sessionId = resume?.sessionId
     let file: string | undefined
-    const locate = () => (file ??= sessionId ? transcriptPath(cwd, sessionId) : undefined)
+    // Looked for again if it moves: a session that enters a worktree of its own
+    // is filed under that worktree's project from then on.
+    const locate = () => {
+      if (!file || !fs.existsSync(file)) file = sessionId ? transcriptPath(cwd, sessionId) : undefined
+      return file
+    }
     let reader: TranscriptReader
     let costAtStart = 0
 

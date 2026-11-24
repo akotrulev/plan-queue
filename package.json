@@ -800,12 +800,12 @@
         "planQueue.worktrees": {
           "type": "boolean",
           "default": true,
-          "description": "Run each plan on a branch of its own in a git worktree of its own, so several plans can run at once. Each passing task is committed there; when every task is done or skipped the branch is merged into the branch it was cut from. Off, or outside a git repository, plans run in the workspace one at a time."
+          "description": "Run each plan on a branch of its own in a git worktree of its own, so several plans can run at once. Each passing task is committed there; when every task is done or skipped the branch is merged into the branch it was cut from. Required in a git repository: Claude Code background sessions isolate their edits in a worktree, so a task run in place would not change the workspace. Outside a git repository, plans run in the workspace one at a time."
         },
         "planQueue.worktreeRoot": {
           "type": "string",
           "default": "",
-          "description": "Folder the plan worktrees are created in, absolute or relative to the repository root. Empty uses a sibling folder, <repo>.plan-queue."
+          "description": "Folder the plan worktrees are created in, absolute or relative to the repository root. Empty uses <repo>/.claude/worktrees (kept out of git status through .git/info/exclude). Keep it under a .claude/worktrees folder: anywhere else, Claude Code moves each task's edits into a worktree of its own."
         },
         "planQueue.worktreeSetupCommand": {
           "type": "string",
