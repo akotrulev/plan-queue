@@ -99,9 +99,10 @@ turn ended, follows up, and stops it.
   the session again, and so does running the task again. While a session is
   stopped mid-plan (paused, or between the queue's follow-ups) its tab shows the
   task's transcript, and re-attaches by itself when the queue resumes it.
-- **Clicking a task** that is running, waiting, blocked or failed opens its
-  session's tab (a failed one woken for review); clicking any other task opens
-  its prompt in the plan, which the task's inline button does for every task.
+- **Clicking a task** brings its session's tab forward while one is open, and
+  otherwise opens its prompt in the plan, which the task's inline button does
+  for every task. *Open the task's session* (right-click) opens a tab when
+  there is none, waking a failed task's session for review.
   `planQueue.sessionTerminalLocation` puts them in the terminal panel instead. Closing the terminal leaves
   the session running; *Open the task's session* (the terminal button on a
   running task, or right-click) opens it again. `planQueue.sessionTerminals`

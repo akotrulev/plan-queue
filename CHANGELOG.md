@@ -16,8 +16,8 @@
   conversation can be reviewed in Claude Code — closing the tab stops it. A
   stopped session's tab shows the task's transcript and re-attaches in place
   when the queue resumes it.
-- Clicking a running, waiting, blocked or failed task opens its session's tab;
-  any other task opens its prompt, and the inline button still does for all.
+- Clicking a task brings its session's tab forward while one is open, and
+  otherwise opens its prompt; the inline button still opens the prompt.
 - The plan's output channel no longer opens when a plan starts, unless
   `planQueue.sessionTerminals` is `never`; *Show the log* still opens it.
 - **Questions are answered in the session.** A task that ends on

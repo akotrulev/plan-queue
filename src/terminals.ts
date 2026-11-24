@@ -155,6 +155,14 @@ export class SessionTerminals implements vscode.Disposable {
     t.show(!focus)
   }
 
+  /** Bring the task's tab forward with the cursor in it. False when it has none open. */
+  reveal(planPath: string, taskId: string): boolean {
+    const had = this.open.get(`${planPath}#${taskId}`)
+    if (!had || had.terminal.exitStatus !== undefined) return false
+    had.terminal.show(false)
+    return true
+  }
+
   /** Open the task's session in a terminal and put the cursor in it. */
   show(e: { planPath: string; taskId: string; title: string; sessionId: string; cwd: string }): void {
     this.ensure(e).show(false)

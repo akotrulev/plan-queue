@@ -548,6 +548,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('planQueue.moveUp', (node?: Node) => reorder(node, -1)),
     vscode.commands.registerCommand('planQueue.moveDown', (node?: Node) => reorder(node, 1)),
 
+    vscode.commands.registerCommand('planQueue.clickTask', async (node?: Node) => {
+      const t = asTask(node)
+      if (!t) return
+      if (!terminals.reveal(t.plan.path, t.task.id)) {
+        await vscode.commands.executeCommand('planQueue.openPrompt', node)
+      }
+    }),
+
     vscode.commands.registerCommand('planQueue.openPrompt', async (node?: Node) => {
       const t = asTask(node)
       if (!t) return

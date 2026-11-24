@@ -470,7 +470,7 @@
         },
         {
           "command": "planQueue.openSession",
-          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(running|waiting)\\.live$/",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(running\\.live|waiting\\.live|blocked|failed)/",
           "group": "1_run@0"
         },
         {
