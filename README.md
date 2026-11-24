@@ -82,24 +82,37 @@ Verified against seven real plans of different vintages.
 
 ## Running
 
-Each task is one `claude -p` invocation, so each gets a genuinely fresh context.
+Each task is one Claude Code **background session** (`claude --bg`), so each
+gets a genuinely fresh context, and each is the real interactive Claude Code:
+you can open it in a terminal, watch it work, answer its prompts and type into
+it, while the queue drives it — starts it with the task's prompt, judges how its
+turn ended, follows up, and stops it.
+
+- **A terminal per task.** As a task's session starts, a terminal named after
+  the task (`T3 · Orders API`) opens in the background, running
+  `claude attach <session>` — the full Claude Code UI on that session. When the
+  task needs you, its terminal is brought forward. Closing the terminal leaves
+  the session running; *Open the task's session* (the terminal button on a
+  running task, or right-click) opens it again. `planQueue.sessionTerminals`
+  chooses `onStart` (default), `whenNeeded` or `never`.
+- The queue watches the session through `claude agents --json` and reads its
+  transcript, so the plan's log still shows what it says and the tools it calls.
 
 - **Run queue** starts at the first task that is not done or skipped.
 - **Run from here** starts at the task you picked; **Run this task only** runs
   exactly one.
-- **Stop** kills the running task and leaves it pending — in the view title it
-  stops every running plan; on a plan, just that one. Each task (and each gate)
-  runs in a process group of its own, so Stop also takes down what it started:
-  a dev server, a test watcher. The same happens when a task ends normally.
+- **Stop** stops the task's session (`claude stop`) and leaves the task
+  pending — in the view title it stops every running plan; on a plan, just that
+  one. A gate runs in a process group of its own, so Stop also takes down what
+  it started: a dev server, a test watcher.
 - **Pause** (the pause button on a running task, on a plan, or in the view
   title for every plan) interrupts the task but keeps its session: the task
   goes to `paused`, and its changes stay in the tree. See
   [Pausing and resuming](#pausing-and-resuming).
-- **Message the running task** (the speech-bubble button in the view title, `cmd+alt+m` /
-  `ctrl+alt+m`, or the command palette) types into the task already in flight —
-  the same as interjecting in an interactive session. The task's stdin stays
-  open for the whole run, so the message lands in the turn that is running, not
-  after it. What you send is echoed into the log with a `>` prefix.
+- **Open a running task's session** (the speech-bubble button in the view
+  title, `cmd+alt+m` / `ctrl+alt+m`, or the command palette) opens the session
+  of the task in flight — pick one when several are running — so you can
+  interject by typing into it. What you type shows in the log with a `>` prefix.
 
 An appended system prompt asks every task to end its final message with one
 line of its own:
@@ -112,8 +125,8 @@ line of its own:
 
 A sentinel only counts on a line of its own (bold or backticks are fine), and
 the last one wins, so a message that merely mentions `PLAN_QUEUE: DONE` is not
-taken for it. Running out of turns or budget, or a non-zero exit, also halt the
-queue. Two failures do not: a [usage limit](#when-the-usage-limit-is-hit) pauses
+taken for it. A turn that ends on an API error the session could not get past
+also halts the queue. Two failures do not: a [usage limit](#when-the-usage-limit-is-hit) pauses
 the task, and a [temporary API error](#when-the-usage-limit-is-hit) is retried
 first.
 
@@ -168,17 +181,28 @@ genuinely cannot go on). So does one that ended with no sentinel and still gave
 none when asked. Instead of failing, the task goes to **waiting for reply**:
 
 - It turns yellow in the tree, its question is in the tooltip and at the end of
-  the log, and a notification shows the gist with a **Reply** button.
-- Only that plan pauses. Other plans keep running, and the plan's worktree stays
-  as it is.
-- Answer with **Reply** (the notification, the task's inline button, or
-  right-click), or with **Message the running task** / `ctrl+alt+m`, which
-  offers the reply box when the task is waiting. The answer resumes the same
-  session (`claude -p --resume <session>`) in the same folder, so the agent keeps
-  its full context. The task is then judged as usual (sentinel, gate, commit),
-  and the plan carries on.
-- Stopping the plan, or closing the window, leaves the task waiting. Reply to
-  it later and the plan starts again from that task.
+  the log, its terminal comes forward, and a notification shows the gist with an
+  **Open session** button.
+- Only that task waits. Other tasks and plans keep running, and the plan's
+  worktree stays as it is.
+- Its session stays up. **Answer by typing into it** — the task's terminal, or
+  **Reply** (the notification, the task's inline button, right-click, or
+  `ctrl+alt+m`), which opens it. The queue sees the session carry on, follows
+  the new turn, and judges it as usual (sentinel, gate, commit); the plan
+  carries on.
+- An answer can also come from outside the session — `pq reply`, the MCP
+  `reply` tool, or the reply box, which *Reply* offers when the session is no
+  longer running. The queue then stops the session and resumes it in the
+  background with the answer (`claude --bg --resume <session>`), so the agent
+  keeps its full context.
+- Stopping the plan, or closing the window, leaves the task waiting, and its
+  session up. Answer it later and the plan starts again from that task.
+
+A session can also stop **mid-turn** on something only a person can answer in
+it — a permission prompt for a command that is not on the allowlist, or a
+question asked with Claude Code's own question picker. The task shows as
+`waiting · needs you in its session`, its terminal comes forward, and once you
+answer there it goes back to working.
 - Cost and duration add up across the turns of a task.
 
 With `planQueue.requireSentinel` off, a turn that ends cleanly is done, so a
@@ -198,12 +222,11 @@ task at once.
 
 ### Pausing and resuming
 
-*Pause* asks the task's Claude session to stop its turn — the same as pressing
-Esc in an interactive session — and keeps the session. A paused task is orange
-in the tree, and its plan shows `paused T3`.
+*Pause* stops the task's session (`claude stop`) and keeps its conversation. A
+paused task is orange in the tree, and its plan shows `paused T3`.
 
 - **Resume** (the task's inline button, or right-click) carries on in the same
-  session (`claude -p --resume <session>`), told it was paused and to check
+  session (`claude --bg --resume <session>`), told it was paused and to check
   anything that was cut off — a test run, say — before relying on it. Running
   the plan again does the same: a paused task always resumes its session rather
   than starting over.
@@ -221,6 +244,8 @@ in the tree, and its plan shows `paused T3`.
 - A paused task's changes stay in the worktree, and are not stashed if another
   task fails. A task that passes beside it is committed with them in it.
 - A task waiting for your reply is not paused; it stays waiting.
+- A session that ends mid-turn by itself — `/exit` typed into it, or
+  `claude stop` from a shell — leaves its task paused, to resume the same way.
 
 ### When the usage limit is hit
 
@@ -230,8 +255,7 @@ not fail the task. It pauses it, and carries on by itself once the limit resets.
 - The task goes to `paused` with `usage limit (five_hour) · resumes 03:02`. Its
   session and its changes are kept, nothing is stashed, and the plan is not
   halted. No error is shown.
-- The reset time comes from the CLI's rate-limit message, or from the text it
-  printed (`resets 3am`, `resets 15:30`, `resets Nov 21, 10am (Europe/Sofia)`;
+- The reset time comes from the message the session ended its turn on (`resets 3am`, `resets 15:30`, `resets Nov 21, 10am (Europe/Sofia)`;
   the zone in parentheses is honoured, local time is used without one). If there
   is no time, the queue waits 30 minutes for a 5-hour limit and 6 hours for a
   weekly one, and looks again.
@@ -255,9 +279,8 @@ not fail the task. It pauses it, and carries on by itself once the limit resets.
   Pausing one limit-paused task does the same for that task.
 - Turn it off with `planQueue.resumeAfterLimit`. Tasks still pause, and nothing
   new starts while the limit is on, but you resume them yourself.
-- `planQueue.limitStartThreshold` (percent, default 0 = off) stops new tasks
-  from starting once a window is that full, and waits for its reset. Tasks
-  already running carry on.
+- `planQueue.limitStartThreshold` no longer applies: background sessions do
+  not report how full a usage window is.
 
 A turn cut off by a temporary API error (overloaded, a 5xx, a dropped
 connection; never a 4xx such as a prompt that is too long or a bad key) is
@@ -277,16 +300,14 @@ gate, the commit or the stash. *Show the log* on a task opens its latest one,
 even after the window that ran it has closed. The last ten per task are kept, in
 VS Code's storage for this workspace.
 
-### When a command is denied
+### When a command needs permission
 
-Anything not on `planQueue.allowedTools` is denied rather than waiting for a
-prompt. The queue reads which calls were denied, logs them, and names the
-allowlist entry that would have let each one through — `Bash(terraform:*)`
-for a command, the tool's name otherwise. When the task did not finish, the
-entries are on the task (*denied …*) and the error notification has an
-**Allow** button; right-click the task for *Allow the tools this task was
-denied*. They are added wherever `allowedTools` is set now; run the task again
-to use them.
+Anything not on `planQueue.allowedTools` (and not covered by the permission
+mode) asks in the task's session, as Claude Code always does. The task shows as
+waiting until you answer in its terminal; nothing else is held up. To let a
+command through without asking next time, add it to the allowlist — or answer
+the prompt with Claude Code's own "don't ask again", which it saves in the
+project's settings.
 
 ### Taking a task over by hand
 
@@ -445,7 +466,7 @@ these tools:
 | `run_plan` | start a plan (optionally `from_task`); returns at once |
 | `run_task` | run one task; `now` starts it beside a running plan |
 | `reply` | answer a waiting task |
-| `message` | type into a task that is working |
+| `message` | answer a waiting task; a working one takes messages only in its session |
 | `get_log` | the last lines of the plan's log, or of one task's transcript |
 | `stop` | stop one plan or all |
 | `pause` | pause a task, a plan, or all, keeping each session |
@@ -494,17 +515,18 @@ Trust): a plan's prompts run with file edits and an allowlist of shell commands,
 and `gateCommand`, `worktreeSetupCommand`, `claudePath` and `extraArgs` can come
 from the folder's own `.vscode/settings.json`. Trust the folder first.
 
-The default is `--permission-mode acceptEdits` with `--permission-prompts none`
-and an allowlist (`planQueue.allowedTools`). File edits are accepted, allowlisted
-commands run, and **anything else is denied outright rather than waiting** — so
-an unattended task fails loudly instead of sitting on a prompt nobody will
-answer. Widen the allowlist when a plan needs a command it does not cover;
-`bypassPermissions` is available in the setting if you want it.
+The default is `--permission-mode acceptEdits` with an allowlist
+(`planQueue.allowedTools`). File edits are accepted, allowlisted commands run,
+and **anything else asks in the task's session** — the task waits until you
+answer there. For a backlog that runs overnight, widen the allowlist so nothing
+waits on you, or use `auto` or `bypassPermissions` in the setting.
 
 ## It spends money
 
-Every task is a real model call. `planQueue.budgetUsd` sets a per-task
-`--max-budget-usd` ceiling; the tree shows what each task cost.
+Every task is a real model call; the tree shows what each task cost, read
+from the session's own accounting when its turn is done. There is no per-task
+ceiling: `--max-budget-usd` works only with `claude -p`, so
+`planQueue.budgetUsd` no longer applies.
 
 ## Settings
 
@@ -513,16 +535,15 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.planGlob` | `docs/plans/**/*.md` | Which files to list |
 | `planQueue.claudePath` | `claude` | Path to the CLI |
 | `planQueue.model` | — | `--model` for every task |
-| `planQueue.permissionMode` | `acceptEdits` | `--permission-mode` |
+| `planQueue.permissionMode` | `acceptEdits` | `--permission-mode` each session starts with |
+| `planQueue.sessionTerminals` | `onStart` | When a task's session gets a terminal: `onStart`, `whenNeeded`, `never` |
 | `planQueue.allowedTools` | a working set | Commands allowed without a prompt |
-| `planQueue.budgetUsd` | `0` | Per-task `--max-budget-usd`; 0 is no ceiling |
 | `planQueue.gateCommand` | — | Shell check after each task |
 | `planQueue.gateTimeoutMinutes` | `30` | Kill a gate or setup command after this long; 0 is no limit |
 | `planQueue.gateRetries` | `1` | Times a failed gate's output is handed back to the task to fix |
 | `planQueue.stashFailedWork` | `true` | Stash what a task that did not pass left in its worktree |
 | `planQueue.resumeAfterLimit` | `true` | Pause tasks at the usage limit and carry on after the reset |
 | `planQueue.limitResumeDelaySeconds` | `120` | Wait this long after the reset before resuming |
-| `planQueue.limitStartThreshold` | `0` | Percent of a usage window at which no new tasks start; 0 is off |
 | `planQueue.resumeOnOpen` | `false` | When the window opens, resume plans whose tasks the window closing paused |
 | `planQueue.backlog.enabled` | `true` | Start the plans on the backlog by itself |
 | `planQueue.backlog.maxPlans` | `1` | Backlog plans running at once |
@@ -531,7 +552,7 @@ Every task is a real model call. `planQueue.budgetUsd` sets a per-task
 | `planQueue.stopOnFailure` | `true` | Halt the queue on a failed task |
 | `planQueue.requireSentinel` | `true` | Require `PLAN_QUEUE: DONE`; a missing one is asked about once |
 | `planQueue.useAgentFromPlan` | `true` | Honour the heading's agent |
-| `planQueue.extraArgs` | `[]` | Extra `claude` arguments |
+| `planQueue.extraArgs` | `[]` | Extra arguments for the `claude --bg` that starts each session |
 | `planQueue.logThinking` | `false` | Include the model's thinking in the log |
 | `planQueue.worktrees` | `true` | One worktree and branch per plan, so plans run in parallel |
 | `planQueue.worktreeRoot` | — | Where worktrees go; empty is `<repo>.plan-queue/` beside the repo |

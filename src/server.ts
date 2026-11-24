@@ -397,7 +397,7 @@ export class ControlServer implements vscode.Disposable {
       },
       {
         name: 'message',
-        description: 'Send a message into a task that is working right now, like typing into its session. Omit task when the plan has only one running.',
+        description: 'Answer a task that is waiting on a question, like reply. A task that is working takes messages only in its own Claude Code session (claude attach <id>), not from here. Omit task when the plan has only one running.',
         inputSchema: {
           type: 'object',
           properties: { plan: planArg, task: taskArg, text: { type: 'string' } },
@@ -406,7 +406,7 @@ export class ControlServer implements vscode.Disposable {
         run: async (a) => {
           const plan = await this.resolve(a.plan)
           if (!this.queue.send(plan.path, String(a.text ?? ''), a.task ? String(a.task) : undefined)) {
-            throw new ToolError('no such running task, or it is no longer taking input; name the task if several are running')
+            throw new ToolError('no such task waiting for a reply; a working task takes messages only in its session (claude attach <id>); name the task if several are running')
           }
           return { sent: true }
         },

@@ -5,9 +5,10 @@ import * as vscode from 'vscode'
 import { BacklogRunner } from './sweeper'
 import { readPlan } from './plan'
 import { allowTools, Queue } from './queue'
-import { composePrompt, readConfig } from './runner'
+import { composePrompt, liveSession, readConfig } from './runner'
 import { ControlServer } from './server'
 import { StateStore } from './state'
+import { SessionTerminals } from './terminals'
 import { PlanTree, type Node, type TaskNode } from './tree'
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -32,6 +33,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.storageUri ? path.join(context.storageUri.fsPath, 'logs') : undefined,
   )
   tree.isRunning = (planPath) => queue.isRunning(planPath)
+
+  const terminals = new SessionTerminals(() => readConfig().claudePath)
+  const sessionEvents = queue.onSession((e) =>
+    terminals.onSession({
+      planPath: e.planPath,
+      taskId: e.task.id,
+      title: e.task.title,
+      sessionId: e.sessionId,
+      cwd: e.cwd,
+      attention: e.attention,
+    }),
+  )
 
   const backlogLog = vscode.window.createOutputChannel('Plan Queue — backlog')
   const backlog = new BacklogRunner(state, queue, tree, backlogLog)
@@ -118,6 +131,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
    * Answer a task that is waiting on a question. The log is shown first, since
    * the question in full is there; the box carries its last lines.
    */
+  /** Where a plan's tasks run: its worktree, or the workspace folder. */
+  const cwdOf = (planPath: string) =>
+    state.worktree(planPath)?.cwd ??
+    vscode.workspace.getWorkspaceFolder(vscode.Uri.file(planPath))?.uri.fsPath ??
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+
+  /**
+   * The task's background session in a terminal — the full Claude Code UI, to
+   * answer it or just watch. A waiting task whose session is gone gets the
+   * reply box instead, which resumes the session with the answer.
+   */
+  const openSession = async (planPath: string, taskId: string, title?: string) => {
+    const st = state.get(planPath, taskId)
+    const cwd = cwdOf(planPath)
+    if (st.sessionId && cwd && (await liveSession(readConfig().claudePath, cwd, st.sessionId))) {
+      const name = title ?? queue.liveTasks(planPath).find((l) => l.task.id === taskId)?.task.title ?? ''
+      terminals.show({ planPath, taskId, title: name, sessionId: st.sessionId, cwd })
+      return
+    }
+    if (st.status === 'waiting') {
+      await askReply(planPath, taskId)
+      return
+    }
+    void vscode.window.showInformationMessage(
+      `Plan Queue — ${taskId} has no session running. "Resume the task's session in a terminal" opens its conversation.`,
+    )
+  }
+
   const askReply = async (planPath: string, taskId: string) => {
     const st = state.get(planPath, taskId)
     if (st.status !== 'waiting') {
@@ -145,6 +186,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     queue,
+    terminals,
+    sessionEvents,
     backlog,
     backlogLog,
     server,
@@ -329,7 +372,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // From the tree it is a node; from the "is asking" notification, plain ids.
         const t = arg && 'kind' in arg ? asTask(arg) : undefined
         const target = t ? { planPath: t.plan.path, taskId: t.task.id } : arg && !('kind' in arg) ? arg : undefined
-        if (target) await askReply(target.planPath, target.taskId)
+        if (target) await openSession(target.planPath, target.taskId, t?.task.title)
+      },
+    ),
+
+    vscode.commands.registerCommand(
+      'planQueue.openSession',
+      async (arg?: Node | { planPath: string; taskId: string }) => {
+        const t = arg && 'kind' in arg ? asTask(arg) : undefined
+        const target = t ? { planPath: t.plan.path, taskId: t.task.id } : arg && !('kind' in arg) ? arg : undefined
+        if (target) await openSession(target.planPath, target.taskId, t?.task.title)
       },
     ),
 
@@ -353,9 +405,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               )
             )?.run
       if (!target) return
-      // A task that asked something gets the reply box, with its question.
-      if (target.waiting && target.task && text === undefined) {
-        await askReply(target.planPath, target.task.id)
+      // A message from a person is typed into the task's session.
+      if (target.task && text === undefined) {
+        await openSession(target.planPath, target.task.id, target.task.title)
         return
       }
       const message =

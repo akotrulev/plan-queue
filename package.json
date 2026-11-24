@@ -179,15 +179,21 @@
       },
       {
         "command": "planQueue.sendMessage",
-        "title": "Message the running task",
+        "title": "Open a running task's session",
         "category": "Plan Queue",
         "icon": "$(comment)"
       },
       {
         "command": "planQueue.reply",
-        "title": "Reply to the task",
+        "title": "Reply in the task's session",
         "category": "Plan Queue",
         "icon": "$(reply)"
+      },
+      {
+        "command": "planQueue.openSession",
+        "title": "Open the task's session",
+        "category": "Plan Queue",
+        "icon": "$(terminal)"
       },
       {
         "command": "planQueue.showLog",
@@ -458,6 +464,16 @@
           "group": "2_state@4"
         },
         {
+          "command": "planQueue.openSession",
+          "when": "view == planQueue.tasks && viewItem == task.running.live",
+          "group": "inline@0"
+        },
+        {
+          "command": "planQueue.openSession",
+          "when": "view == planQueue.tasks && viewItem =~ /^task\\.(running|waiting)\\.live$/",
+          "group": "1_run@0"
+        },
+        {
           "command": "planQueue.pauseTask",
           "when": "view == planQueue.tasks && viewItem == task.running.live",
           "group": "inline@0"
@@ -583,6 +599,10 @@
         {
           "command": "planQueue.pauseTask",
           "when": "false"
+        },
+        {
+          "command": "planQueue.openSession",
+          "when": "false"
         }
       ]
     },
@@ -614,7 +634,22 @@
             "manual"
           ],
           "default": "acceptEdits",
-          "description": "--permission-mode for each task. acceptEdits auto-accepts file edits and leaves commands to the allowlist."
+          "description": "--permission-mode each task's session starts with. acceptEdits auto-accepts file edits and runs the commands on planQueue.allowedTools; for anything else the session asks, and the task shows as waiting until you answer in its session."
+        },
+        "planQueue.sessionTerminals": {
+          "type": "string",
+          "enum": [
+            "onStart",
+            "whenNeeded",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Open a terminal on each task's session as it starts, in the background, and bring it forward when the task needs you.",
+            "Open a task's terminal only once it needs you: a question, or a prompt in its session.",
+            "Never open one by itself; use \"Open the task's session\"."
+          ],
+          "default": "onStart",
+          "description": "Each task runs as a Claude Code background session; its terminal runs `claude attach` on it, the full Claude Code UI. Closing the terminal leaves the session running."
         },
         "planQueue.allowedTools": {
           "type": "array",
@@ -662,7 +697,8 @@
         "planQueue.budgetUsd": {
           "type": "number",
           "default": 0,
-          "description": "Per-task ceiling passed to --max-budget-usd. 0 means no ceiling."
+          "description": "Per-task ceiling passed to --max-budget-usd. 0 means no ceiling.",
+          "markdownDeprecationMessage": "No longer applied: tasks run as interactive background sessions, and `--max-budget-usd` only works with `--print`."
         },
         "planQueue.gateCommand": {
           "type": "string",
@@ -697,7 +733,8 @@
           "default": 0,
           "minimum": 0,
           "maximum": 100,
-          "description": "Percent of a usage window (5-hour or weekly) at which the queue stops starting new tasks and waits for the reset, instead of running into the limit mid-task. 0 turns it off. Tasks already running carry on."
+          "description": "Percent of a usage window (5-hour or weekly) at which the queue stops starting new tasks and waits for the reset, instead of running into the limit mid-task. 0 turns it off. Tasks already running carry on.",
+          "markdownDeprecationMessage": "No longer applied: interactive sessions do not report how much of a usage window is used, so there is nothing to compare against. A task that hits the limit is still paused and resumed at the reset."
         },
         "planQueue.resumeOnOpen": {
           "type": "boolean",
@@ -753,7 +790,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra arguments appended to every claude invocation."
+          "description": "Extra arguments for the `claude --bg` command that starts each task's session. A resumed session keeps the options it started with."
         },
         "planQueue.logThinking": {
           "type": "boolean",
@@ -813,8 +850,8 @@
     "typecheck": "tsc --noEmit",
     "package": "npm run typecheck && npm test && npm run build && npx --yes @vscode/vsce package --no-dependencies -o plan-queue.vsix",
     "release": "node scripts/release.mjs",
-    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs test/describe.test.mjs test/chain.test.mjs test/limits.test.mjs test/backlog.test.mjs",
-    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts src/describe.ts src/chain.ts src/limits.ts src/backlog.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
+    "test": "node --test test/parse.test.mjs test/git.test.mjs test/verdict.test.mjs test/schedule.test.mjs test/describe.test.mjs test/chain.test.mjs test/limits.test.mjs test/backlog.test.mjs test/session.test.mjs",
+    "pretest": "npx esbuild src/plan.ts src/git.ts src/verdict.ts src/schedule.ts src/describe.ts src/chain.ts src/limits.ts src/backlog.ts src/session.ts --bundle --platform=node --format=esm --outdir=out --out-extension:.js=.mjs --log-level=error",
     "publish": "npx --yes @vscode/vsce publish --no-dependencies",
     "publish:ovsx": "npx --yes ovsx publish plan-queue.vsix"
   },

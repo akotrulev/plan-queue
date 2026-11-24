@@ -17,7 +17,16 @@ import {
 import { looksLikeAPlan, parsePlanText, readPlan, type Task } from './plan'
 import { successors, type PlanFacts } from './chain'
 import { LimitGate, type BlockOptions, type LimitInfo } from './limits'
-import { readConfig, runGate, runTask, type LogSink, type Resume, type RunHandle } from './runner'
+import {
+  answeredInSession,
+  forgetSession,
+  readConfig,
+  runGate,
+  runTask,
+  type LogSink,
+  type Resume,
+  type RunHandle,
+} from './runner'
 import { readyTasks, unknownDeps } from './schedule'
 import { gateFixPrompt } from './describe'
 import { NUDGE, RESUMED } from './verdict'
@@ -92,6 +101,8 @@ interface Live {
   task: Task
   handle?: RunHandle
   waiting?: { answer: (reply: string | undefined) => void }
+  /** Stopped mid-turn on a prompt only a person can answer, in its session. */
+  blocked?: boolean
   /** Using a slot: false while it waits for a person, so that does not hold up the others. */
   busy: boolean
   /** Asked to pause: whatever turn or gate it is in ends, and its session is kept. */
@@ -159,6 +170,20 @@ export interface ActiveRun {
   waiting: boolean
 }
 
+/** A task's session came up, or needs a person: for a terminal to attach to it. */
+export interface SessionEvent {
+  planPath: string
+  task: Task
+  sessionId: string
+  /** Where the session runs. */
+  cwd: string
+  /** It waits on a person: a question, or a prompt in its session. */
+  attention: boolean
+}
+
+/** What awaitReply hands back: an answer to send, or word that the person answered in the session itself. */
+type Answer = { text: string } | { inSession: number }
+
 type RunOptions = {
   fromId?: string
   onlyId?: string
@@ -192,6 +217,9 @@ export class Queue implements vscode.Disposable {
   private readonly runStarted = new vscode.EventEmitter<string>()
   /** Fires with the plan's path when a run claims its slot. */
   readonly onRunStarted = this.runStarted.event
+  private readonly sessionEvent = new vscode.EventEmitter<SessionEvent>()
+  /** Fires when a task's session comes up, and again when it needs a person. */
+  readonly onSession = this.sessionEvent.event
   private readonly planStopped = new vscode.EventEmitter<string[]>()
   /** Fires with the plans a person stopped or paused, so nothing restarts them by itself. */
   readonly onPlanStopped = this.planStopped.event
@@ -381,7 +409,7 @@ export class Queue implements vscode.Disposable {
   liveTasks(planPath: string): { task: Task; waiting: boolean }[] {
     return [...(this.runs.get(planPath)?.live.values() ?? [])].map((l) => ({
       task: l.task,
-      waiting: l.waiting !== undefined,
+      waiting: l.waiting !== undefined || Boolean(l.blocked),
     }))
   }
 
@@ -393,7 +421,7 @@ export class Queue implements vscode.Disposable {
             planPath: r.planPath,
             title: r.title,
             task: l.task,
-            waiting: l.waiting !== undefined,
+            waiting: l.waiting !== undefined || Boolean(l.blocked),
           }))
         : [{ planPath: r.planPath, title: r.title, task: undefined, waiting: false }],
     )
@@ -600,6 +628,7 @@ export class Queue implements vscode.Disposable {
     this.runEnded.dispose()
     this.runStarted.dispose()
     this.planStopped.dispose()
+    this.sessionEvent.dispose()
     for (const out of this.channels.values()) out.dispose()
   }
 
@@ -982,12 +1011,23 @@ export class Queue implements vscode.Disposable {
         // A question that arrived as the task was being paused wins: it waits for the answer instead.
         live.pausing = false
         this.kick(run)
-        const answer = reply ?? (await this.awaitReply(run, live, before.question ?? ''))
+        const answer: Answer | undefined =
+          reply !== undefined ? { text: reply } : await this.awaitReply(run, live, before.question ?? '', before.sessionId)
         reply = undefined
         live.busy = true
         if (answer === undefined) return
-        out.appendLine(`  > ${answer.split('\n').join('\n  > ')}`)
-        resume = { sessionId: before.sessionId, reply: answer, label: 'resumed with your reply', kind: 'reply' }
+        if ('text' in answer) {
+          out.appendLine(`  > ${answer.text.split('\n').join('\n  > ')}`)
+          resume = { sessionId: before.sessionId, reply: answer.text, label: 'resumed with your reply', kind: 'reply' }
+        } else {
+          resume = {
+            sessionId: before.sessionId,
+            reply: '',
+            label: 'you answered in its session',
+            adopt: { offset: answer.inSession },
+            kind: 'reply',
+          }
+        }
       } else if (before.status === 'paused' && before.sessionId) {
         resume = { sessionId: before.sessionId, reply: RESUMED, label: 'resumed after a pause', kind: 'queue' }
       }
@@ -1008,8 +1048,11 @@ export class Queue implements vscode.Disposable {
         resume,
         parallel: run.parallel,
         sessionName: `plan-queue ${run.title} ${task.id}`,
-        onSession: (id) => void this.state.set(planPath, task.id, { sessionId: id }),
-        onRateLimit: (info) => this.feedGate(info),
+        onSession: (id) => {
+          void this.state.set(planPath, task.id, { sessionId: id })
+          this.sessionEvent.fire({ planPath, task, sessionId: id, cwd: run.cwd, attention: false })
+        },
+        onBlocked: (question) => void this.setBlocked(run, live, question),
       })
       if (live.pausing) live.handle.pause()
       const result = await live.handle.result
@@ -1203,6 +1246,7 @@ export class Queue implements vscode.Disposable {
       })
       await this.changed()
       run.ran++
+      if (ok && result.sessionId) forgetSession(cfg.claudePath, result.sessionId, run.cwd)
 
       if (!ok) {
         await this.leaveBehind(run, live, out)
@@ -1397,17 +1441,52 @@ export class Queue implements vscode.Disposable {
     }
   }
 
-  /** Hold a task until its question is answered, or the plan is stopped. */
-  private async awaitReply(run: Run, live: Live, question: string): Promise<string | undefined> {
+  /**
+   * A session that stopped mid-turn on a prompt only a person can answer: the
+   * task shows as waiting until it carries on. Its turn is still in flight,
+   * so there is no reply to send; the person answers in the session.
+   */
+  private async setBlocked(run: Run, live: Live, question: string | undefined): Promise<void> {
     const { task } = live
-    const answer = new Promise<string | undefined>((resolve) => {
-      live.waiting = {
-        answer: (reply) => {
-          live.waiting = undefined
-          resolve(reply)
-        },
+    live.blocked = question !== undefined
+    await this.state.set(
+      run.planPath,
+      task.id,
+      question === undefined
+        ? { status: 'running', reason: undefined, question: undefined }
+        : { status: 'waiting', reason: 'needs you in its session', question },
+    )
+    await this.changed()
+    const sessionId = this.state.get(run.planPath, task.id).sessionId
+    if (question === undefined || !sessionId) return
+    this.sessionEvent.fire({ planPath: run.planPath, task, sessionId, cwd: run.cwd, attention: true })
+    void vscode.window
+      .showWarningMessage(`Plan Queue — ${task.id} (${run.title}) needs you in its session.`, 'Open session')
+      .then((pick) => {
+        if (pick) void vscode.commands.executeCommand('planQueue.openSession', { planPath: run.planPath, taskId: task.id })
+      })
+  }
+
+  /**
+   * Hold a task until its question is answered — through Reply, or typed into
+   * its session — or the plan is stopped.
+   */
+  private async awaitReply(run: Run, live: Live, question: string, sessionId: string): Promise<Answer | undefined> {
+    const { task } = live
+    const watching = new AbortController()
+    const answer = new Promise<Answer | undefined>((resolve) => {
+      const settle = (a: Answer | undefined) => {
+        watching.abort()
+        live.waiting = undefined
+        resolve(a)
       }
+      live.waiting = { answer: (reply) => settle(reply === undefined ? undefined : { text: reply }) }
+      // Or the person types the answer straight into the session.
+      void answeredInSession(readConfig().claudePath, run.cwd, sessionId, watching.signal).then((offset) => {
+        if (offset !== undefined && live.waiting) settle({ inSession: offset })
+      })
     })
+    this.sessionEvent.fire({ planPath: run.planPath, task, sessionId, cwd: run.cwd, attention: true })
     await this.changed()
     const gist = question
       .split('\n')
@@ -1418,12 +1497,12 @@ export class Queue implements vscode.Disposable {
     void vscode.window
       .showWarningMessage(
         `Plan Queue — ${task.id} (${run.title}) is asking: ${gist.length > 240 ? '…' + gist.slice(-240) : gist}`,
-        'Reply',
+        'Open session',
         'Show log',
       )
       .then((pick) => {
-        if (pick === 'Reply') {
-          void vscode.commands.executeCommand('planQueue.reply', { planPath: run.planPath, taskId: task.id })
+        if (pick === 'Open session') {
+          void vscode.commands.executeCommand('planQueue.openSession', { planPath: run.planPath, taskId: task.id })
         } else if (pick) run.out.show()
       })
     const reply = await answer
@@ -1515,8 +1594,8 @@ export class Queue implements vscode.Disposable {
       this.status.hide()
     } else {
       const lives = runs.flatMap((r) => [...r.live.values()])
-      const waiting = lives.filter((l) => l.waiting).length
-      const working = lives.filter((l) => !l.waiting)
+      const waiting = lives.filter((l) => l.waiting || l.blocked).length
+      const working = lives.filter((l) => !l.waiting && !l.blocked)
       this.status.text =
         runs.length === 1
           ? waiting && !working.length

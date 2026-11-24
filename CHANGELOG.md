@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- **Every task is a real Claude Code session.** A task now runs as a Claude
+  Code background session (`claude --bg`) instead of `claude -p`, and gets a
+  terminal of its own, named after the task, running `claude attach` on it — the
+  full Claude Code UI, driven by the queue. Watch it work, answer its permission
+  prompts and questions, and type into it there. Closing the terminal leaves
+  the session running; *Open the task's session* opens it again.
+  `planQueue.sessionTerminals` (`onStart`, `whenNeeded`, `never`) sets when a
+  terminal opens by itself.
+- **Questions are answered in the session.** A task that ends on
+  `PLAN_QUEUE: QUESTION` keeps its session up, its terminal comes forward, and
+  the queue carries on once you answer there. *Reply*, `pq reply` and the MCP
+  `reply` tool still work: they resume the session with the answer.
+- **A session that stops on a prompt mid-turn** shows as
+  `waiting · needs you in its session` until you answer it.
+- **Commands not on the allowlist ask instead of being denied.** The task waits
+  on you in its session; *Allow the tools this task was denied* has nothing left
+  to allow. Widen `planQueue.allowedTools`, or use `auto` or
+  `bypassPermissions`, for runs nobody watches.
+- Messages to a working task go into its session by typing; *Message the
+  running task* became *Open a running task's session*, and the MCP `message`
+  tool only answers waiting tasks.
+- **No longer applied:** `planQueue.budgetUsd` (`--max-budget-usd` works only
+  with `-p`) and `planQueue.limitStartThreshold` (background sessions do not
+  report how full a usage window is). Cost per task still shows, read from the
+  session's own accounting.
+
 ## 0.6.0
 
 - **The usage limit is a pause, not a failure.** When Claude Code hits the
